@@ -46,3 +46,5 @@ backend/data/
 dev-share-state/
 *.bak.ts
 .tmp-*
+*.broken.bak
+*.onnx.bak
