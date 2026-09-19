@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Camera Test</title>
+<style>*{margin:0;padding:0}body{background:#000;overflow:hidden;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#fff}
+video{width:100%;max-width:500px;border-radius:12px;transform:scaleX(-1)}
+#status{margin-top:12px;font-size:14px;padding:8px 16px;border-radius:8px;background:rgba(0,0,0,0.6)}
+button{padding:12px 32px;font-size:16px;border:none;border-radius:28px;background:#4f8cff;color:#fff;cursor:pointer;margin-top:12px}
+#error{color:#ff4444;font-size:13px;margin-top:8px;display:none}
+</style>
+</head>
+<body>
+<video id="video" autoplay playsinline></video>
+<div id="status">点击按钮测试摄像头</div>
+<button id="btn">打开摄像头</button>
+<div id="error"></div>
+<script>
+const video = document.getElementById('video');
+const status = document.getElementById('status');
+const btn = document.getElementById('btn');
+const error = document.getElementById('error');
+
+btn.onclick = async () => {
+  btn.disabled = true;
+  status.textContent = '请求摄像头...';
+  error.style.display = 'none';
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment' }
+    });
+    video.srcObject = stream;
+    status.textContent = '✅ 摄像头工作正常！';
+    status.style.color = '#4ade80';
+    btn.textContent = '关闭摄像头';
+    btn.onclick = () => { stream.getTracks().forEach(t => t.stop()); video.srcObject = null; };
+    btn.disabled = false;
+  } catch (e) {
+    error.style.display = 'block';
+    error.textContent = '错误: ' + e.message;
+    status.textContent = '❌ 摄像头失败: ' + e.name;
+    status.style.color = '#ff4444';
+    btn.disabled = false;
+  }
+};
+</script>
+</body>
+</html>

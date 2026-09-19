@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Minimal AR Test</title>
+  <style>*{margin:0;padding:0}body{background:#000;overflow:hidden}</style>
+</head>
+<body>
+<div id="status" style="position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:100;background:rgba(0,0,0,0.8);color:#fff;padding:8px 16px;border-radius:8px;font:14px sans-serif">Loading...</div>
+<div id="error" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:200;color:#ff4444;font:14px sans-serif;text-align:center;display:none;background:rgba(0,0,0,0.9);padding:20px;border-radius:12px"></div>
+
+<script>
+const $ = id => document.getElementById(id)
+const status = $('status'), error = $('error')
+
+function showError(msg) {
+  error.style.display = 'block'; error.textContent = msg
+  status.textContent = '❌ Error'; status.style.color = '#ff4444'
+  console.error('[MinAR]', msg)
+}
+
+function loadScript(src, attrs) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script')
+    s.src = src; s.async = true
+    if (attrs) for (const [k, v] of Object.entries(attrs)) s.setAttribute(k, v)
+    s.onload = resolve
+    s.onerror = () => reject(new Error('Failed: ' + src))
+    document.head.appendChild(s)
+  })
+}
+
+function waitForGlobal(key, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const start = Date.now()
+    const poll = () => {
+      if (window[key] !== undefined) return resolve(window[key])
+      if (Date.now() - start > timeoutMs) return reject(new Error('Timeout waiting for ' + key))
+      requestAnimationFrame(poll)
+    }
+    poll()
+  })
+}
+
+async function main() {
+  status.textContent = 'Loading 8th Wall...'
+  try {
+    await loadScript('/8thwall/xr.js', { 'data-preload-chunks': 'slam' })
+  } catch (e) {
+    showError('Load failed: ' + e.message); return
+  }
+
+  let XR8
+  try {
+    XR8 = await waitForGlobal('XR8', 30000)
+  } catch (e) {
+    showError('XR8 timeout'); return
+  }
+  status.textContent = 'XR8 loaded ✓'
+
+  // Canvas
+  const canvas = document.createElement('canvas')
+  canvas.style.display = 'block'; canvas.style.width = '100vw'; canvas.style.height = '100vh'
+  document.body.insertBefore(canvas, document.body.firstChild)
+
+  // Pipeline modules
+  try {
+    XR8.addCameraPipelineModule(XR8.XrController.pipelineModule())
+    XR8.addCameraPipelineModule(XR8.GlTextureRenderer.pipelineModule())
+    XR8.addCameraPipelineModule(XR8.Threejs.pipelineModule())
+  } catch (e) {
+    showError('Pipeline error: ' + e.message); return
+  }
+
+  status.textContent = 'Starting AR...'
+
+  try {
+    await XR8.run({ canvas, allowedDevices: XR8.XrConfig.device().ANY })
+    status.textContent = 'AR running ✓'
+    status.style.color = '#4ade80'
+
+    // Place cube on tap
+    document.addEventListener('click', () => {
+      try {
+        const xs = XR8.Threejs.xrScene()
+        const pos = new THREE.Vector3(0, 0, -0.5).applyQuaternion(xs.camera.quaternion).add(xs.camera.position)
+        pos.y = Math.max(pos.y, 0)
+
+        const cube = new THREE.Mesh(
+          new THREE.BoxGeometry(0.15, 0.15, 0.15),
+          new THREE.MeshStandardMaterial({ color: 0x4f8cff })
+        )
+        cube.position.copy(pos)
+        xs.scene.add(cube)
+      } catch(e) { console.error(e) }
+    }, { once: true })
+  } catch (e) {
+    showError('XR8.run failed: ' + (e.message || e))
+  }
+}
+
+main().catch(err => showError(err.message || String(err)))
+</script>
+</body>
+</html>

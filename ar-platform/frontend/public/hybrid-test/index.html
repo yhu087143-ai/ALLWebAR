@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>AR SLAM 测试 (8th Wall)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touch-action: none; font-family: sans-serif; }
+    canvas { display: block; width: 100vw !important; height: 100vh !important; object-fit: cover !important; }
+    #status { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 100;
+              background: rgba(0,0,0,0.75); color: #fff; padding: 6px 16px; border-radius: 8px;
+              font: 13px sans-serif; white-space: nowrap; pointer-events: none; }
+    #telemetry { position: fixed; top: 12px; right: 12px; z-index: 100;
+                 background: rgba(0,0,0,0.6); color: #8f8; padding: 4px 10px; border-radius: 6px;
+                 font: 11px/1.5 monospace; pointer-events: none; min-width: 100px;
+                 text-align: right; display: block; }
+    #hint { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); z-index: 100;
+            background: rgba(0,0,0,0.5); color: rgba(255,255,255,0.9); padding: 10px 24px;
+            border-radius: 20px; font: 14px sans-serif; text-align: center; pointer-events: none;
+            backdrop-filter: blur(4px); border: 1px solid rgba(255,255,255,0.1);
+            transition: opacity 0.5s ease; }
+    #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 200;
+             color: #ff4444; font: 14px sans-serif; text-align: center; max-width: 85vw;
+             background: rgba(0,0,0,0.9); padding: 20px 24px; border-radius: 12px; display: none;
+             line-height: 1.5; }
+    #start-btn { position: fixed; bottom: 120px; left: 50%; transform: translateX(-50%); z-index: 150;
+                 background: #4f8cff; color: #fff; border: none; border-radius: 28px;
+                 padding: 14px 40px; font: 16px sans-serif; font-weight: 600;
+                 cursor: pointer; display: none; box-shadow: 0 4px 20px rgba(79,140,255,0.4); }
+    #telemetry .badge.on { color: #8f8; }
+    #telemetry .badge.off { color: #ff8; }
+    #telemetry .badge.err { color: #f88; }
+  </style>
+</head>
+<body>
+  <div id="status">载入 8th Wall 引擎...</div>
+  <div id="telemetry">
+    <div id="fps">--</div>
+    <div id="surface">--</div>
+    <div id="reloc">--</div>
+  </div>
+  <div id="hint"></div>
+  <div id="error"></div>
+  <button id="start-btn">启动 AR</button>
+  <canvas id="camera"></canvas>
+
+  <script type="importmap">
+  { "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/"
+  }}
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+
+    // ── 暴露 Three.js 到全局 ──
+    window.THREE = THREE;
+
+    // ── DOM 引用 ──
+    const $ = id => document.getElementById(id);
+    const statusEl = $('status');
+    const hintEl = $('hint');
+    const errorEl = $('error');
+    const startBtn = $('start-btn');
+    const telemetryEl = $('telemetry');
+
+    // ── 辅助函数 ──
+    function showError(msg) {
+      errorEl.style.display = 'block';
+      errorEl.textContent = msg;
+      statusEl.textContent = msg;
+      statusEl.style.color = '#ff4444';
+      console.error('[HybridTest]', msg);
+    }
+    window.showError = showError;
+
+    function loadScript(url, attrs) {
+      return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = url;
+        s.async = true;
+        if (attrs) for (const [k, v] of Object.entries(attrs)) s.setAttribute(k, v);
+        s.onload = () => { s.setAttribute('data-loaded', 'true'); resolve(); };
+        s.onerror = () => reject(new Error('脚本加载失败: ' + url));
+        document.head.appendChild(s);
+      });
+    }
+
+    function waitForGlobal(key, timeoutMs) {
+      return new Promise((resolve, reject) => {
+        const start = Date.now();
+        const poll = () => {
+          if (window[key] !== undefined) return resolve(window[key]);
+          if (Date.now() - start > timeoutMs) return reject(new Error('等待 ' + key + ' 超时'));
+          requestAnimationFrame(poll);
+        };
+        poll();
+      });
+    }
+
+    // ── 入口：先加载 8th Wall 引擎，再导入 app.js ──
+    async function main() {
+      statusEl.textContent = '载入 8th Wall 引擎...';
+      try {
+        await loadScript('/8thwall/xr.js', { 'data-preload-chunks': 'slam' });
+      } catch (e) {
+        showError('引擎加载失败: ' + e.message);
+        return;
+      }
+
+      let XR8;
+      try {
+        XR8 = await waitForGlobal('XR8', 30000);
+      } catch (e) {
+        showError('XR8 初始化超时');
+        return;
+      }
+      statusEl.textContent = '8th Wall 已加载，启动 app...';
+
+      import('./app.js').then(() => {
+        statusEl.textContent = 'App 就绪 — 点击「启动 AR」';
+        startBtn.style.display = 'block';
+
+        startBtn.addEventListener('click', async () => {
+          startBtn.style.display = 'none';
+          statusEl.textContent = '请求摄像头权限...';
+
+          try {
+            const testStream = await navigator.mediaDevices.getUserMedia({
+              video: { facingMode: 'environment' }
+            });
+            testStream.getTracks().forEach(function (t) { t.stop(); });
+            /* Brief delay to release camera lock on mobile */
+            await new Promise(function (r) { setTimeout(r, 400); });
+          } catch (e) {
+            showError('摄像头权限被拒绝: ' + e.message);
+            return;
+          }
+
+          statusEl.textContent = '启动 AR 会话...';
+          var canvas = document.getElementById('camera');
+          try {
+            var result = XR8.run({ canvas: canvas, allowedDevices: XR8.XrConfig.device().ANY });
+            if (result && typeof result.then === 'function') await result;
+          } catch (e) {
+            showError('AR 启动失败: ' + (e.message || String(e)));
+          }
+        }, { once: true });
+      }).catch(err => {
+        showError('应用加载失败: ' + (err.message || String(err)));
+      });
+    }
+
+    main().catch(err => { showError(err.message || String(err)); });
+  </script>
+</body>
+</html>

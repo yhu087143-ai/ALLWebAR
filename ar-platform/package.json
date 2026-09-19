@@ -1,0 +1,52 @@
+{
+  "name": "ar-platform",
+  "private": true,
+  "workspaces": [
+    "ar-engine",
+    "frontend",
+    "backend"
+  ],
+  "scripts": {
+    "dev:backend": "node backend/src/index.js",
+    "dev:frontend": "npx vite --config frontend/vite.config.js",
+    "dev:engine": "cd ar-engine && npx vite build && npx tsc --emitDeclarationOnly",
+    "start": "npm run dev:engine && echo 'Run dev:backend and dev:frontend separately'",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "npm test --workspaces --if-present",
+    "check:all": "npm run typecheck && npm run lint && npm run test && npm run build",
+    "prepare": "husky",
+    "dev": "node scripts/dev-all.mjs",
+    "dev:xr-watch": "node scripts/watch-xr-engine.mjs",
+    "check:ui": "node scripts/check-ui-consistency.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "eslint": "^9.0.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "husky": "^9.0.0",
+    "lint-staged": "^15.0.0",
+    "prettier": "^3.0.0",
+    "typescript-eslint": "^8.0.0"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx,mjs}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,css,md}": [
+      "prettier --write"
+    ]
+  },
+  "dependencies": {
+    "@8thwall/engine-binary": "^1.0.0",
+    "@8thwall/xrextras": "^1.0.0"
+  },
+  "overrides": {
+    "canvas": "npm:empty-npm-package@1.0.0"
+  }
+}

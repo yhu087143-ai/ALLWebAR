@@ -1,0 +1,23 @@
+[
+  {
+    "id": "engine-api",
+    "name": "AR平台 后端",
+    "port": 3001,
+    "url": "http://localhost:3001/",
+    "ok": false
+  },
+  {
+    "id": "engine-web",
+    "name": "AR平台 前端(主)",
+    "port": 5180,
+    "url": "https://localhost:5180/",
+    "ok": false
+  },
+  {
+    "id": "xr-studio",
+    "name": "XR 创作台",
+    "port": 5174,
+    "url": "https://localhost:5180/xr-studio",
+    "ok": true
+  }
+]

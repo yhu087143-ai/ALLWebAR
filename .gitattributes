@@ -1,0 +1,11 @@
+* text=auto
+*.png binary
+*.jpg binary
+*.glb binary
+*.mind binary
+*.wasm binary
+*.woff binary
+*.woff2 binary
+*.ico binary
+*.basis binary
+*.ktx2 binary

@@ -1,0 +1,42 @@
+AR 平台启动说明（Windows）
+=====================================
+
+【最常用】双击：启动AR平台.bat
+  · 自动检查依赖 -> 构建 AR 引擎 -> 开两个窗口启动 后端(3001) 和 前端(https://localhost:5180)
+  · 自动打开浏览器 https://localhost:5180/
+  · 屏幕上会打印【手机测试地址】：https://<你的局域网IP>:5180/
+
+【手机真机测试步骤】
+  1) 手机与电脑连同一个 WiFi
+  2) 手机浏览器打开上面打印的 https://<局域网IP>:5180/
+  3) 提示"证书不受信任" -> 选"高级"->"继续访问"（自签证书，正常现象）
+     （想彻底不提示：把 frontend/public/mkcert-ca.crt 传到手机安装并信任）
+  4) 页面里允许摄像头 -> 发布/打开资产 -> 二维码一定是 https 链接，扫码即可进 AR
+
+【手机连不上？】
+  双击：放行防火墙(管理员).bat  ← 必须右键"以管理员身份运行"
+  （放行 TCP 5180 前端、3001 后端；只对"专用/域"网络生效，公共网络下 Windows 仍会拦）
+
+【关掉服务】
+  直接关掉那两个黑窗口；或双击：停止AR平台.bat
+
+【[!] 千万别做的事】
+  不要设置 AR_HTTPS=0（或 set AR_HTTPS=0 后再启动）。
+  那会让服务变成 http，浏览器只在 HTTPS / localhost 下放行摄像头，
+  手机上一定报"当前页面不是安全上下文"。
+
+【手动启动（不用 bat，命令行依次执行）】
+  cd /d D:\project3lianjie\ar-platform
+  npm run dev:engine        :: 只在 ar-engine\dist 不存在时才需要，约 1 分钟
+  :: 开一个窗口：
+  cd backend  && npm run dev      :: 后端 http://localhost:3001
+  :: 再开一个窗口：
+  cd frontend && npm run dev      :: 前端 https://localhost:5180
+
+【另外两个项目】
+  母亲节 AR： 双击 D:\mothersday\启动母亲节AR.bat        （前端 https://localhost:5173）
+  导览 AR：   双击 D:\ar-tour-guide\启动导览AR.bat        （前端 https://localhost:3000）
+
+【QQ/微信扫二维码打不开？】
+  多数 App 内置浏览器不允许调用摄像头/WebXR。
+  用系统相机扫码，或把链接复制到 Chrome / Safari 打开。

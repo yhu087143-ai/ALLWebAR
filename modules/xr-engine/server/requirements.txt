@@ -1,0 +1,9 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+httpx>=0.27
+python-multipart>=0.0.9
+trimesh>=4.4
+
+# 可选：仅在使用本地 GPU 推理时需要
+# torch / xformers / InstantMesh 的依赖请按其官方 requirements 单独安装，
+# 建议放在独立虚拟环境里，避免和本服务的依赖冲突。

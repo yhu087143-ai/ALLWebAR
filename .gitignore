@@ -1,0 +1,48 @@
+# ===== 密钥与环境变量（绝不入库）=====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+
+# ===== 依赖与构建产物 =====
+node_modules/
+dist/
+build/
+.next/
+.vite/
+*.tsbuildinfo
+
+# ===== 日志与运行时产物 =====
+_logs/
+logs/
+*.log
+*.out
+
+# ===== 备份与系统文件 =====
+*.bak
+*.bak-*
+.DS_Store
+Thumbs.db
+
+# ===== 用户数据（数据库/上传物）=====
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+backend/data/
+**/uploads/
+**/dev.db
+
+# ===== AI 工具目录 =====
+.claude*
+.agents/
+.workbuddy/
+
+# ===== 开发期产物 =====
+dev-share-state/
+*.bak.ts
+.tmp-*

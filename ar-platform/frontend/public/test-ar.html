@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>AR Test v2</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; }
+    #container { width: 100vw; height: 100vh; }
+    #status { position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+              z-index: 100; background: rgba(0,0,0,0.7); color: #fff;
+              padding: 8px 16px; border-radius: 8px; font: 14px sans-serif; }
+    #fps { position: fixed; top: 20px; right: 20px; z-index: 100;
+           background: rgba(0,0,0,0.7); color: #0f0; font: 12px monospace;
+           padding: 6px 10px; border-radius: 4px; }
+    #debug { position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
+             background: rgba(0,0,0,0.8); color: #0f0; font: 11px monospace;
+             padding: 8px; max-height: 150px; overflow-y: auto; white-space: pre-wrap; }
+    .error { color: #f44 !important; }
+  </style>
+</head>
+<body>
+  <div id="status">初始化中...</div>
+  <div id="fps">-- fps</div>
+  <div id="container"></div>
+  <div id="debug"></div>
+
+  <script type="module">
+    import * as THREE from '/@fs/D:/project3lianjie/ar-platform/ar-engine/node_modules/three/build/three.module.js';
+    import { MindARThree } from '/@fs/D:/project3lianjie/ar-platform/ar-engine/node_modules/mind-ar/dist/mindar-image-three.prod.js';
+
+    const $ = (id) => document.getElementById(id);
+    const status = $('status');
+    const debug = $('debug');
+    const fpsEl = $('fps');
+    const log = (msg, isError) => {
+      const line = document.createElement('div');
+      line.textContent = msg;
+      if (isError) line.className = 'error';
+      debug.appendChild(line);
+      if (debug.children.length > 30) debug.removeChild(debug.firstChild);
+      console.log(msg);
+    };
+
+    async function main() {
+      try {
+        log('Starting...');
+
+        // 使用 default.mind 来对比
+        const targetUrl = '/uploads/target_1778553137978_39u90x.mind';
+        log('Target URL: ' + targetUrl);
+
+        const mindAR = new MindARThree({
+          container: $('container'),
+          imageTargetSrc: targetUrl,
+          filterMinCF: 0.001,
+          filterBeta: 10,
+          missTolerance: 15,
+          warmupTolerance: 3,
+        });
+
+        const { renderer, scene, camera } = mindAR;
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+        const gl = renderer.getContext();
+        log('WebGL: ' + gl.getParameter(gl.RENDERER));
+
+        // Lights
+        scene.add(new THREE.AmbientLight(0xffffff, 1.5));
+        const dir = new THREE.DirectionalLight(0xffffff, 2);
+        dir.position.set(0, 3, 3);
+        scene.add(dir);
+
+        // Anchor
+        const anchor = mindAR.addAnchor(0);
+
+        // Cube
+        const geom = new THREE.BoxGeometry(0.3, 0.3, 0.3);
+        const mat = new THREE.MeshStandardMaterial({ color: 0x22c55e });
+        const cube = new THREE.Mesh(geom, mat);
+        cube.position.set(0, 0.15, 0.3);
+        anchor.group.add(cube);
+
+        // 给锚点加一个轴辅助（红X 绿Y 蓝Z）
+        const axes = new THREE.AxesHelper(0.5);
+        anchor.group.add(axes);
+
+        // Tracking
+        let tracked = false;
+        anchor.onTargetFound = () => {
+          tracked = true;
+          status.textContent = '>>> 已识别 <<<';
+          status.style.color = '#4ade80';
+          log('>>> TARGET FOUND');
+        };
+        anchor.onTargetLost = () => {
+          tracked = false;
+          status.textContent = '目标丢失';
+          status.style.color = '#fbbf24';
+          log('<<< Target lost');
+        };
+
+        log('Starting AR...');
+        await mindAR.start();
+        log('AR started!');
+
+        // FPS
+        let frames = 0, lastFps = performance.now();
+
+        // Render loop
+        // 临时 vector 用于矩阵分解
+        const _pos = new THREE.Vector3();
+        const _quat = new THREE.Quaternion();
+        const _scl = new THREE.Vector3();
+
+        renderer.setAnimationLoop(() => {
+          // MindAR 设 matrixAutoUpdate=false，直接设 group.matrix
+          // 必须 matrix.decompose() 才能读到真实位姿
+          anchor.group.matrix.decompose(_pos, _quat, _scl);
+          const time = performance.now();
+
+          // 每 30 帧输出一次位姿
+          if (frames % 30 === 0) {
+            const p = _pos.toArray().map(v => v.toFixed(3)).join(',');
+            const q = _quat.toArray().map(v => v.toFixed(3)).join(',');
+            const euler = new THREE.Euler().setFromQuaternion(_quat);
+            const deg = euler.toArray().map(v => THREE.MathUtils.radToDeg(v).toFixed(1)).join(',');
+            log(`frame=${frames}  pos=[${p}]  euler=[${deg}]deg tracked=${tracked}`);
+          }
+
+          // FPS
+          frames++;
+          if (time - lastFps > 1000) {
+            fpsEl.textContent = Math.round(frames * 1000 / (time - lastFps)) + ' fps';
+            frames = 0;
+            lastFps = time;
+          }
+
+          renderer.render(scene, camera);
+        });
+
+        status.textContent = '扫描目标图片中...';
+        status.style.color = '#fbbf24';
+
+      } catch (err) {
+        status.textContent = '错误';
+        status.style.color = '#ff4444';
+        log('ERROR: ' + err.message, true);
+        log(err.stack || '', true);
+      }
+    }
+
+    main();
+  </script>
+</body>
+</html>

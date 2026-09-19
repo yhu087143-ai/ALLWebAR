@@ -1,0 +1,15 @@
+node_modules
+dist
+dist-ssr
+.vite
+*.local
+.env
+.env.*
+!server/.env.example
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.log
+public/assets/models/*
+!public/assets/models/.gitkeep

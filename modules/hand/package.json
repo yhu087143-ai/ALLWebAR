@@ -1,0 +1,26 @@
+{
+  "name": "project1xr",
+  "private": true,
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "db:push": "turbo db:push",
+    "db:generate": "turbo db:generate",
+    "clean": "turbo clean",
+    "setup": "bash scripts/setup.sh",
+    "docker:up": "docker compose -f infra/docker/docker-compose.yml up -d",
+    "docker:down": "docker compose -f infra/docker/docker-compose.yml down"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.4",
+  "devDependencies": {
+    "turbo": "2.9.14"
+  },
+  "dependencies": {
+    "ws": "^8.20.1"
+  }
+}

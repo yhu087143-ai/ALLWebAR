@@ -1,0 +1,464 @@
+/* ============================================================
+   AR Engine UI — Deep Space Theme
+   Matching 1XR Platform's dark space design language
+   ============================================================ */
+
+/* ── CSS Custom Properties ── */
+:root {
+  --ds-bg: #1f1a3a;
+  --ds-surface: rgba(42, 36, 80, 0.75);
+  --ds-surface-strong: rgba(42, 36, 80, 0.9);
+  --ds-border: rgba(77, 69, 144, 0.7);
+  --ds-border-light: rgba(77, 69, 144, 0.35);
+  --ds-text: #f0ecf8;
+  --ds-text-secondary: #b0a8d0;
+  --ds-text-muted: rgba(176, 168, 208, 0.5);
+  --ds-primary: #c084fc;
+  --ds-primary-hover: #a855f7;
+  --ds-blue: #60a5fa;
+  --ds-pink: #f472b6;
+  --ds-gold: #fbbf24;
+  --ds-error: #ff5577;
+  --ds-success: #34d399;
+  --ds-cyan: #22d3ee;
+
+  --ds-radius-sm: 0.5rem;
+  --ds-radius-md: 0.75rem;
+  --ds-radius-lg: 1rem;
+  --ds-radius-xl: 1.5rem;
+
+  --ds-ease-smooth: cubic-bezier(0.22, 1, 0.36, 1);
+  --ds-ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  --ds-font-sans: 'Sora', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --ds-font-display: 'Syne', 'PingFang SC', sans-serif;
+  --ds-font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+/* ── Spinner Animation ── */
+@keyframes ds-spin { to { transform: rotate(360deg); } }
+@keyframes ds-fade-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes ds-fade-scale {
+  from { opacity: 0; transform: scale(0.92); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes ds-glow-pulse {
+  0%, 100% { box-shadow: 0 0 12px rgba(192, 132, 252, 0.15); }
+  50% { box-shadow: 0 0 28px rgba(192, 132, 252, 0.35); }
+}
+@keyframes ds-gradient-flow {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+@keyframes ds-ambient-drift {
+  0% { transform: scale(1) translate(0, 0); }
+  100% { transform: scale(1.06) translate(-1%, 1%); }
+}
+@keyframes ds-shimmer {
+  0% { opacity: 0.2; }
+  100% { opacity: 0.6; }
+}
+@keyframes ds-toast-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(12px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+@keyframes ds-progress-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(385%); }
+}
+
+/* ── Start Overlay ── */
+.ar-start-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  background: var(--ds-bg);
+}
+.ar-start-overlay::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 25% 20%, rgba(139, 92, 246, 0.35) 0%, transparent 50%),
+    radial-gradient(ellipse at 75% 30%, rgba(96, 165, 250, 0.25) 0%, transparent 45%),
+    radial-gradient(ellipse at 50% 80%, rgba(244, 114, 182, 0.2) 0%, transparent 50%);
+  pointer-events: none;
+  animation: ds-ambient-drift 20s ease-in-out infinite alternate;
+}
+.ar-start-overlay::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(circle, rgba(192, 132, 252, 0.07) 1px, transparent 1px);
+  background-size: 32px 32px;
+  pointer-events: none;
+}
+.ar-start-content {
+  position: relative;
+  text-align: center;
+  padding: 0 28px;
+  z-index: 1;
+  animation: ds-fade-up 0.5s var(--ds-ease-smooth) forwards;
+}
+.ar-start-icon-box {
+  display: inline-flex;
+  border-radius: var(--ds-radius-xl);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(77, 69, 144, 0.3);
+  padding: 20px;
+  margin-bottom: 24px;
+}
+.ar-start-icon {
+  width: 48px;
+  height: 48px;
+  color: var(--ds-primary);
+  filter: drop-shadow(0 0 8px rgba(192, 132, 252, 0.3));
+}
+.ar-start-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--ds-text);
+  font-family: var(--ds-font-display);
+  margin-bottom: 10px;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+.ar-start-title .gradient-text {
+  background: linear-gradient(135deg, #c084fc, #60a5fa, #f472b6);
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: ds-gradient-flow 5s ease infinite;
+}
+.ar-start-desc {
+  font-size: 14px;
+  color: var(--ds-text-secondary);
+  margin-bottom: 6px;
+  line-height: 1.5;
+}
+.ar-start-hint {
+  font-size: 12px;
+  color: var(--ds-text-muted);
+  margin-bottom: 28px;
+}
+.ar-start-btn {
+  display: inline-block;
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--ds-radius-md);
+  background: linear-gradient(135deg, #c084fc, #60a5fa);
+  padding: 14px 40px;
+  font-size: 15px;
+  font-weight: 600;
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  transition: all 0.3s var(--ds-ease-smooth);
+  font-family: var(--ds-font-sans);
+}
+.ar-start-btn::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, #c084fc, #f472b6, #60a5fa);
+  background-size: 200% 200%;
+  animation: ds-gradient-flow 3s ease infinite;
+  opacity: 0;
+  transition: opacity 0.3s;
+  border-radius: inherit;
+}
+.ar-start-btn:hover::before { opacity: 1; }
+.ar-start-btn:hover {
+  transform: translateY(-2px) scale(1.02);
+  box-shadow: 0 8px 32px rgba(192, 132, 252, 0.35);
+}
+.ar-start-btn:active { transform: translateY(0); }
+.ar-start-btn > span { position: relative; z-index: 1; }
+
+/* ── Loading Overlay ── */
+.ar-loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+.ar-spinner {
+  width: 44px;
+  height: 44px;
+  border: 3px solid rgba(192, 132, 252, 0.15);
+  border-top-color: var(--ds-primary);
+  border-radius: 50%;
+  animation: ds-spin 0.7s linear infinite;
+  box-shadow: 0 0 20px rgba(192, 132, 252, 0.1);
+}
+.ar-loading-text {
+  font-size: 13px;
+  color: var(--ds-text-secondary);
+  font-family: var(--ds-font-sans);
+  animation: ds-shimmer 1.5s ease-in-out infinite alternate;
+}
+/* Indeterminate progress bar under spinner */
+.ar-loading-bar {
+  width: 160px;
+  height: 3px;
+  background: rgba(61, 53, 112, 0.25);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.ar-loading-bar .fill {
+  height: 100%;
+  width: 35%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, #c084fc, #60a5fa);
+  box-shadow: 0 0 8px rgba(192, 132, 252, 0.3);
+  animation: ds-progress-indeterminate 1.8s ease-in-out infinite;
+}
+
+/* ── Error Toast ── */
+.ar-error-toast {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  background: rgba(255, 85, 119, 0.12);
+  border: 1px solid rgba(255, 85, 119, 0.3);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-radius: var(--ds-radius-md);
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  animation: ds-fade-up 0.3s var(--ds-ease-smooth) forwards;
+  max-width: 85%;
+}
+.ar-error-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+.ar-error-text {
+  font-size: 13px;
+  color: #ff5577;
+  font-family: var(--ds-font-sans);
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+/* ── Toast (Runtime) ── */
+.ar-toast {
+  position: absolute;
+  bottom: 100px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  padding: 8px 20px;
+  border-radius: 999px;
+  background: rgba(42, 36, 80, 0.8);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: var(--ds-text);
+  font-size: 13px;
+  font-weight: 500;
+  pointer-events: none;
+  border: 1px solid rgba(192, 132, 252, 0.2);
+  white-space: nowrap;
+  animation: ds-toast-in 0.2s ease-out;
+  font-family: var(--ds-font-sans);
+}
+
+/* ── Splash Screen (view page) ── */
+.ar-splash {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ds-bg);
+  z-index: 100;
+}
+.ar-splash::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 30% 25%, rgba(192, 132, 252, 0.3) 0%, transparent 55%),
+    radial-gradient(ellipse at 70% 75%, rgba(96, 165, 250, 0.2) 0%, transparent 50%);
+  pointer-events: none;
+}
+.ar-splash-content {
+  position: relative;
+  text-align: center;
+  padding: 40px 32px;
+  z-index: 1;
+  animation: ds-fade-scale 0.6s var(--ds-ease-bounce) forwards;
+}
+.ar-splash-message {
+  font-size: 28px;
+  font-weight: 700;
+  font-family: var(--ds-font-display);
+  color: var(--ds-text);
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+.ar-splash-from {
+  font-size: 16px;
+  color: var(--ds-text-secondary);
+  margin-bottom: 36px;
+}
+.ar-splash-btn {
+  display: inline-block;
+  position: relative;
+  overflow: hidden;
+  padding: 16px 52px;
+  border: none;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #c084fc, #60a5fa);
+  color: #fff;
+  font-size: 17px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 24px rgba(192, 132, 252, 0.25);
+  transition: all 0.3s var(--ds-ease-smooth);
+  font-family: var(--ds-font-sans);
+}
+.ar-splash-btn:hover {
+  transform: translateY(-2px) scale(1.03);
+  box-shadow: 0 8px 40px rgba(192, 132, 252, 0.35);
+}
+.ar-splash-btn:active { transform: scale(0.97); }
+
+/* ── HUD Glass Cards ── */
+.hud-glass {
+  background: rgba(42, 36, 80, 0.6);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1.5px solid var(--ds-border-light);
+  border-radius: var(--ds-radius-md);
+  padding: 8px 14px;
+  color: var(--ds-text);
+  font-family: var(--ds-font-sans);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+.hud-glass-strong {
+  background: rgba(42, 36, 80, 0.75);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1.5px solid rgba(192, 132, 252, 0.2);
+  border-radius: var(--ds-radius-lg);
+  padding: 12px 18px;
+  color: var(--ds-text);
+  font-family: var(--ds-font-sans);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+.hud-glow-text {
+  text-shadow: 0 0 10px rgba(192, 132, 252, 0.4), 0 0 20px rgba(192, 132, 252, 0.15);
+}
+
+/* ── AR Container ── */
+.ar-container {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  overflow: hidden;
+}
+.ar-container video,
+.ar-container canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* ── Reticle (Markerless AR) ── */
+.ar-reticle-ring {
+  border: 2px solid rgba(96, 165, 250, 0.7);
+  border-radius: 50%;
+  box-shadow: 0 0 20px rgba(96, 165, 250, 0.2), inset 0 0 20px rgba(96, 165, 250, 0.05);
+  animation: ds-glow-pulse 2s ease-in-out infinite;
+}
+.ar-reticle-dot {
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: 50%;
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.2);
+}
+.ar-place-hint {
+  position: absolute;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: rgba(240, 236, 248, 0.85);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--ds-font-sans);
+  background: rgba(42, 36, 80, 0.5);
+  padding: 8px 20px;
+  border-radius: 999px;
+  pointer-events: none;
+  z-index: 10;
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(192, 132, 252, 0.15);
+  animation: ds-shimmer 2s ease-in-out infinite alternate;
+}
+
+/* ── Fallback Error Page ── */
+.ar-error-fallback {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: var(--ds-bg);
+  text-align: center;
+  padding: 40px;
+  z-index: 200;
+}
+.ar-error-fallback::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at center, rgba(255, 85, 119, 0.08) 0%, transparent 60%);
+  pointer-events: none;
+}
+.ar-error-fallback h2 {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--ds-text);
+  font-family: var(--ds-font-display);
+  margin-bottom: 10px;
+  position: relative;
+}
+.ar-error-fallback p {
+  font-size: 14px;
+  color: var(--ds-text-secondary);
+  margin-bottom: 8px;
+  line-height: 1.5;
+  position: relative;
+}
+.ar-error-fallback .fallback-message {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--ds-primary) !important;
+  margin-top: 16px;
+}
+
+/* ── Responsive ── */
+@media (min-width: 768px) {
+  .ar-start-title { font-size: 26px; }
+  .ar-start-btn { padding: 16px 48px; font-size: 16px; }
+  .ar-splash-message { font-size: 34px; }
+}

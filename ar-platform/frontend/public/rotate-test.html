@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>AR 360° 旋转测试</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; touch-action: none; font-family: sans-serif; }
+    #container { width: 100vw; height: 100vh; }
+
+    #status { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); z-index: 100;
+              background: rgba(0,0,0,0.7); color: #fff; padding: 8px 16px; border-radius: 8px;
+              font: 14px sans-serif; white-space: nowrap; display: none; }
+
+    #progress-wrap { position: fixed; top: 64px; left: 0; right: 0; z-index: 100;
+              display: none; justify-content: center; padding: 0 24px; }
+    #progress-inner { width: 100%; max-width: 320px; }
+    #progress-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+    #progress-header svg { width: 14px; height: 14px; color: rgba(165,180,252,0.8); }
+    #progress-header span { font-size: 12px; color: rgba(199,210,254,0.8); }
+    #progress-pct { margin-left: auto; font-size: 12px; color: rgba(165,180,252,0.6); }
+    #progress-bar { height: 6px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden; }
+    #progress-fill { height: 100%; width: 0%;
+      background: linear-gradient(90deg, #6366f1, #a855f7); border-radius: 3px; transition: width 0.3s; }
+    #progress-sub { font-size: 11px; color: rgba(255,255,255,0.25); margin-top: 4px; }
+
+    #hint { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); z-index: 100;
+            background: rgba(0,0,0,0.6); color: rgba(255,255,255,0.8); padding: 10px 20px;
+            border-radius: 8px; font: 13px sans-serif; text-align: center; pointer-events: none;
+            transition: opacity 1s; display: none; }
+    .hide { opacity: 0 !important; pointer-events: none !important; }
+
+    /* 工具栏 */
+    #toolbar-toggle { position: fixed; bottom: 24px; right: 24px; z-index: 200;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: rgba(30,30,40,0.85); backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.15); color: #fff; font-size: 20px; cursor: pointer;
+      display: none; align-items: center; justify-content: center;
+      transition: transform 0.2s, background 0.2s;
+      user-select: none; -webkit-tap-highlight-color: transparent; }
+    #toolbar-toggle:active { transform: scale(0.9); }
+    #toolbar-toggle.active { background: rgba(99,102,241,0.85); }
+    #toolbar-toggle.show { display: flex; }
+
+    #toolbar-panel { position: fixed; bottom: 84px; right: 24px; z-index: 199;
+      width: 280px; max-height: 60vh; overflow-y: auto;
+      background: rgba(20,20,28,0.92); backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.1); border-radius: 16px;
+      padding: 16px; display: none; color: #e0e0e0; font-size: 13px; }
+    #toolbar-panel.open { display: block; }
+    .tb-section { margin-bottom: 14px; } .tb-section:last-child { margin-bottom: 0; }
+    .tb-label { font-size: 12px; color: rgba(255,255,255,0.5); margin-bottom: 6px; font-weight: 600; letter-spacing: 0.5px; }
+    .tb-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+    .tb-row label { width: 16px; font-size: 11px; color: rgba(255,255,255,0.6); text-align: right; }
+    .tb-row input[type=range] { flex: 1; height: 4px; accent-color: #6366f1; }
+    .tb-row .val { width: 36px; text-align: right; font-size: 11px; color: rgba(255,255,255,0.5); font-variant-numeric: tabular-nums; }
+    .tb-btn { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05); color: #e0e0e0; font-size: 13px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      transition: background 0.15s; user-select: none; -webkit-tap-highlight-color: transparent; }
+    .tb-btn:active { background: rgba(255,255,255,0.12); }
+    .tb-toggle { display: flex; align-items: center; justify-content: space-between; padding: 8px 0; }
+    .tb-toggle .switch { width: 40px; height: 22px; border-radius: 11px; background: rgba(255,255,255,0.15);
+      cursor: pointer; position: relative; transition: background 0.2s; flex-shrink: 0; }
+    .tb-toggle .switch.on { background: #6366f1; }
+    .tb-toggle .switch::after { content: ''; position: absolute; top: 2px; left: 2px;
+      width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: transform 0.2s; }
+    .tb-toggle .switch.on::after { transform: translateX(18px); }
+
+    #toast { position: fixed; bottom: 150px; left: 50%; transform: translateX(-50%); z-index: 300;
+      background: rgba(0,0,0,0.8); color: #fff; padding: 8px 20px; border-radius: 8px;
+      font: 13px sans-serif; transition: opacity 0.3s; opacity: 0; pointer-events: none; }
+    #toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <div id="status" style="display:block">初始化中...</div>
+  <div id="progress-wrap">
+    <div id="progress-inner">
+      <div id="progress-header">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        <span>正在下载 3D 模型</span>
+        <span id="progress-pct">0%</span>
+      </div>
+      <div id="progress-bar"><div id="progress-fill"></div></div>
+      <div id="progress-sub">绿色方块占位中</div>
+    </div>
+  </div>
+  <div id="hint">识别后滑动屏幕 → 360° 旋转模型</div>
+  <div id="container"></div>
+  <div id="toast"></div>
+
+  <button id="toolbar-toggle">⚙</button>
+  <div id="toolbar-panel">
+    <div class="tb-section">
+      <div class="tb-label">📷 拍照</div>
+      <button class="tb-btn" id="btn-photo">📸 截图保存</button>
+    </div>
+    <div class="tb-section">
+      <div class="tb-label">📐 变形</div>
+      <div class="tb-row"><label>X</label><input type="range" id="scale-x" min="0.1" max="5" step="0.05" value="1"><span class="val" id="scale-x-val">1.00</span></div>
+      <div class="tb-row"><label>Y</label><input type="range" id="scale-y" min="0.1" max="5" step="0.05" value="1"><span class="val" id="scale-y-val">1.00</span></div>
+      <div class="tb-row"><label>Z</label><input type="range" id="scale-z" min="0.1" max="5" step="0.05" value="1"><span class="val" id="scale-z-val">1.00</span></div>
+    </div>
+    <div class="tb-section">
+      <div class="tb-label">📍 位置偏移</div>
+      <div class="tb-row"><label>X</label><input type="range" id="pos-x" min="-1" max="1" step="0.01" value="0"><span class="val" id="pos-x-val">0.00</span></div>
+      <div class="tb-row"><label>Y</label><input type="range" id="pos-y" min="-1" max="1" step="0.01" value="0.15"><span class="val" id="pos-y-val">0.15</span></div>
+      <div class="tb-row"><label>Z</label><input type="range" id="pos-z" min="-1" max="1" step="0.01" value="0.3"><span class="val" id="pos-z-val">0.30</span></div>
+    </div>
+    <div class="tb-section">
+      <div class="tb-toggle">
+        <span>🔒 固定位置</span>
+        <div class="switch on" id="toggle-freeze"></div>
+      </div>
+    </div>
+    <div class="tb-section" style="border-top:1px solid rgba(255,255,255,0.08); padding-top:12px;">
+      <button class="tb-btn" id="btn-reset" style="width:100%;color:#f87171;">↺ 恢复默认值</button>
+    </div>
+  </div>
+
+  <script type="importmap">
+  { "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }}
+  </script>
+
+  <script type="module">
+    import { MindARThree } from 'https://cdn.jsdelivr.net/npm/mind-ar@1.2.2/dist/mindar-image-three.prod.js';
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+
+    const $ = id => document.getElementById(id);
+    const status = $('status');
+    const hint = $('hint');
+    const toast = $('toast');
+    const progressWrap = $('progress-wrap');
+    const progressFill = $('progress-fill');
+    const progressPct = $('progress-pct');
+    const toolbox = $('toolbar-toggle');
+
+    let toastTimer;
+    function showToast(msg) {
+      toast.textContent = msg; toast.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove('show'), 2000);
+    }
+
+    // ============ 状态 ============
+    const S = {
+      smoothPos: new THREE.Vector3(), smoothQuat: new THREE.Quaternion(), smoothReady: false,
+      trackPos: new THREE.Vector3(), trackQuat: new THREE.Quaternion(), trackScl: new THREE.Vector3(),
+      tempMatrix: new THREE.Matrix4(),
+      frozen: true, frozenPos: new THREE.Vector3(), frozenQuat: new THREE.Quaternion(),
+      gyroQuat: new THREE.Quaternion(), gyroAtFreeze: new THREE.Quaternion(), gyroTemp: new THREE.Quaternion(),
+      gyroAvailable: false,
+      touchRot: new THREE.Quaternion(), touchRotMat: new THREE.Matrix4(),
+      touchDrag: false, touchNDC: new THREE.Vector2(),
+      userOffset: new THREE.Vector3(0, 0, 0),
+      userScale: new THREE.Vector3(1, 1, 1),
+      modelGroup: null, anchor: null, mindAR: null,
+    };
+
+    // ============ 陀螺仪 ============
+    function initGyro() {
+      if (typeof RelativeOrientationSensor !== 'undefined') {
+        try {
+          const sensor = new RelativeOrientationSensor({ frequency: 60, referenceFrame: 'device' });
+          sensor.addEventListener('reading', () => {
+            const q = sensor.quaternion;
+            if (q) { S.gyroQuat.set(q[0], q[1], q[2], q[3]); S.gyroAvailable = true; }
+          });
+          sensor.start(); return;
+        } catch (e) { console.warn('[Gyro] ROS fail:', e); }
+      }
+      if (window.DeviceOrientationEvent) {
+        window.addEventListener('deviceorientation', (e) => {
+          const a = e.alpha||0, b = e.beta||0, g = e.gamma||0;
+          S.gyroQuat.setFromEuler(new THREE.Euler(
+            THREE.MathUtils.degToRad(b), THREE.MathUtils.degToRad(g), THREE.MathUtils.degToRad(a), 'YXZ'
+          ));
+          S.gyroAvailable = true;
+        });
+      }
+    }
+
+    // ============ 触摸旋转 ============
+    function initTouch(el) {
+      el.addEventListener('touchstart', e => {
+        if (e.touches.length === 1) {
+          S.touchDrag = true;
+          const t = e.touches[0];
+          S.touchNDC.set((t.clientX/el.clientWidth)*2-1, -(t.clientY/el.clientHeight)*2+1);
+        }
+      });
+      el.addEventListener('touchmove', e => {
+        if (!S.touchDrag || e.touches.length !== 1) return;
+        const t = e.touches[0];
+        const nx = (t.clientX/el.clientWidth)*2-1, ny = -(t.clientY/el.clientHeight)*2+1;
+        const dx = nx - S.touchNDC.x, dy = ny - S.touchNDC.y;
+        S.touchNDC.set(nx, ny);
+        if (Math.abs(dx) < 0.0005 && Math.abs(dy) < 0.0005) return;
+        S.touchRot.multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(-dy*Math.PI, -dx*Math.PI, 0)));
+      });
+      el.addEventListener('touchend', () => { S.touchDrag = false; });
+    }
+
+    // ============ 更新位姿 ============
+    function updatePose(group) {
+      group.matrix.decompose(S.trackPos, S.trackQuat, S.trackScl);
+      if (S.frozen) {
+        const p = new THREE.Vector3().copy(S.frozenPos);
+        if (S.gyroAvailable) {
+          S.gyroTemp.copy(S.gyroAtFreeze).invert().premultiply(S.gyroQuat).multiply(S.frozenQuat);
+          S.tempMatrix.identity().compose(p, S.gyroTemp, S.trackScl);
+        } else {
+          S.tempMatrix.identity().compose(p, S.frozenQuat, S.trackScl);
+        }
+        group.matrix.copy(S.tempMatrix);
+        group.matrix.multiply(S.touchRotMat.makeRotationFromQuaternion(S.touchRot));
+        return;
+      }
+      if (S.smoothReady && S.trackPos.lengthSq() > 0.001) {
+        S.frozenPos.copy(S.trackPos); S.frozenQuat.copy(S.trackQuat);
+        S.gyroAtFreeze.copy(S.gyroQuat); S.frozen = true;
+        return;
+      }
+      if (!S.smoothReady) {
+        S.smoothPos.copy(S.trackPos); S.smoothQuat.copy(S.trackQuat); S.smoothReady = true;
+        return;
+      }
+      const motion = Math.max(S.trackPos.distanceTo(S.smoothPos)*5, S.smoothQuat.angleTo(S.trackQuat)*2);
+      S.smoothPos.lerp(S.trackPos, THREE.MathUtils.clamp(motion, 0.03, 0.3));
+      S.smoothQuat.slerp(S.trackQuat, THREE.MathUtils.clamp(motion, 0.03, 0.3));
+      const p = new THREE.Vector3().copy(S.smoothPos);
+      S.tempMatrix.identity().compose(p, S.smoothQuat, S.trackScl);
+      group.matrix.copy(S.tempMatrix);
+      group.matrix.multiply(S.touchRotMat.makeRotationFromQuaternion(S.touchRot));
+    }
+
+    // ============ 工具栏 ============
+    function initToolbar() {
+      const panel = $('toolbar-panel'), toggle = $('toolbar-toggle');
+      let open = false;
+      toggle.addEventListener('click', () => {
+        open = !open; panel.classList.toggle('open', open); toggle.classList.toggle('active', open);
+      });
+
+      $('btn-photo').addEventListener('click', () => {
+        const c = document.querySelector('canvas');
+        if (!c) { showToast('暂无画面'); return; }
+        const a = document.createElement('a');
+        a.download = `ar-photo-${Date.now()}.png`; a.href = c.toDataURL('image/png'); a.click();
+        showToast('📸 已保存截图');
+      });
+
+      for (const a of ['x','y','z']) {
+        const el = $(`scale-${a}`), vl = $(`scale-${a}-val`);
+        el.addEventListener('input', () => {
+          const v = parseFloat(el.value); vl.textContent = v.toFixed(2);
+          S.userScale[a] = v; if (S.modelGroup) S.modelGroup.scale.copy(S.userScale);
+        });
+      }
+      for (const a of ['x','y','z']) {
+        const el = $(`pos-${a}`), vl = $(`pos-${a}-val`);
+        el.addEventListener('input', () => {
+          const v = parseFloat(el.value); vl.textContent = v.toFixed(2);
+          S.userOffset[a] = v; if (S.modelGroup) S.modelGroup.position.copy(S.userOffset);
+        });
+      }
+
+      const sw = $('toggle-freeze');
+      sw.addEventListener('click', () => {
+        S.frozen = !S.frozen; sw.classList.toggle('on', S.frozen);
+        if (S.frozen && S.smoothReady) {
+          S.frozenPos.copy(S.trackPos); S.frozenQuat.copy(S.trackQuat);
+          S.gyroAtFreeze.copy(S.gyroQuat);
+        }
+        showToast(S.frozen ? '🔒 已固定' : '🔓 已解锁');
+      });
+
+      // 恢复默认值
+      $('btn-reset').addEventListener('click', () => {
+        // 缩放
+        S.userScale.set(1, 1, 1);
+        for (const a of ['x','y','z']) {
+          $(`scale-${a}`).value = '1';
+          $(`scale-${a}-val`).textContent = '1.00';
+        }
+        if (S.modelGroup) S.modelGroup.scale.set(1, 1, 1);
+        // 位置
+        S.userOffset.set(0, 0.15, 0.3);
+        for (const a of ['x','y','z']) {
+          const v = a === 'x' ? 0 : a === 'y' ? 0.15 : 0.3;
+          $(`pos-${a}`).value = String(v);
+          $(`pos-${a}-val`).textContent = v.toFixed(2);
+        }
+        if (S.modelGroup) S.modelGroup.position.copy(S.userOffset);
+        // 旋转
+        S.touchRot.identity();
+        // 冻结
+        S.frozen = true;
+        $('toggle-freeze').classList.add('on');
+        showToast('↺ 已恢复默认值');
+      });
+    }
+
+    // ============ 加载模型 ============
+    function loadModel() {
+      return new Promise((resolve, reject) => {
+        progressWrap.style.display = 'flex';
+        progressFill.style.width = '0%';
+        progressPct.textContent = '0%';
+
+        const loader = new GLTFLoader();
+        const draco = new DRACOLoader();
+        draco.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
+        loader.setDRACOLoader(draco);
+
+        loader.load(
+          '/uploads/model_1778553235743_7rm3hx.glb',
+          (gltf) => {
+            progressWrap.style.display = 'none';
+            resolve(gltf.scene);
+          },
+          (xhr) => {
+            if (xhr.total > 0) {
+              const p = xhr.loaded / xhr.total;
+              progressFill.style.width = `${p * 100}%`;
+              progressPct.textContent = `${Math.round(p * 100)}%`;
+            }
+          },
+          (err) => {
+            progressWrap.style.display = 'none';
+            reject(err);
+          }
+        );
+      });
+    }
+
+    // ============ 启动 AR ============
+    async function startAR() {
+      try {
+        status.textContent = '启动 AR...';
+
+        const container = $('container');
+
+        // 先请求摄像头权限（某些手机浏览器需要）
+        try {
+          const tempStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+          // 拿到权限后立即释放，MindAR 内部会重新获取
+          tempStream.getTracks().forEach(t => t.stop());
+        } catch (permErr) {
+          status.textContent = '需要摄像头权限，请允许后刷新页面';
+          status.style.color = '#ff4444';
+          console.error('摄像头权限被拒绝:', permErr);
+          return;
+        }
+
+        S.mindAR = new MindARThree({
+          container,
+          imageTargetSrc: '/uploads/target_1778553137978_39u90x.mind',
+          filterMinCF: 0.0003, filterBeta: 100,
+          missTolerance: 30, warmupTolerance: 8,
+        });
+
+        const { renderer, scene, camera } = S.mindAR;
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+        scene.add(new THREE.AmbientLight(0xffffff, 1.5));
+        const dir = new THREE.DirectionalLight(0xffffff, 2);
+        dir.position.set(0, 3, 3);
+        scene.add(dir);
+
+        // 锚点
+        S.anchor = S.mindAR.addAnchor(0);
+
+        // 占位方块
+        const placeholder = new THREE.Mesh(
+          new THREE.BoxGeometry(0.3, 0.3, 0.3),
+          new THREE.MeshStandardMaterial({ color: 0x22c55e })
+        );
+        placeholder.position.set(0, 0.15, 0.3);
+        S.anchor.group.add(placeholder);
+
+        // 后台加载模型
+        loadModel().then((modelScene) => {
+          // 移除占位方块
+          S.anchor.group.remove(placeholder);
+          placeholder.geometry.dispose();
+          placeholder.material.dispose();
+
+          // wrapper group：内层居中，外层响应滑条
+          const wrapper = new THREE.Group();
+          wrapper.position.set(0, 0.15, 0.3);
+          const box = new THREE.Box3().setFromObject(modelScene);
+          const center = box.getCenter(new THREE.Vector3());
+          modelScene.position.copy(center).negate();
+          wrapper.add(modelScene);
+          S.anchor.group.add(wrapper);
+          S.modelGroup = wrapper;
+
+          status.textContent = '模型已加载 ✓';
+        }).catch((err) => {
+          console.error('模型加载失败:', err);
+          placeholder.material.color.setHex(0xff4444);
+        });
+
+        // 追踪回调
+        S.anchor.onTargetFound = () => {
+          S.frozen = false; S.smoothReady = false;
+          status.textContent = '已识别！';
+          status.style.color = '#4ade80';
+          hint.style.display = 'block';
+          hint.classList.remove('hide');
+          setTimeout(() => hint.classList.add('hide'), 3000);
+        };
+        S.anchor.onTargetLost = () => {
+          status.textContent = '丢失（模型保持）';
+          status.style.color = '#fbbf24';
+        };
+
+        // 启动 MindAR（此时请求摄像头）
+        await S.mindAR.start();
+
+        // 修正投影
+        const proj = camera.projectionMatrix.elements;
+        const vFov = THREE.MathUtils.radToDeg(2 * Math.atan(1 / Math.abs(proj[5])));
+        const w = container.clientWidth, h = container.clientHeight;
+        camera.fov = vFov; camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w, h);
+
+        status.textContent = '扫描目标图片中...';
+        status.style.color = '#fbbf24';
+        toolbox.classList.add('show');
+
+        renderer.setAnimationLoop(() => {
+          updatePose(S.anchor.group);
+          renderer.render(scene, camera);
+        });
+
+      } catch (err) {
+        status.textContent = '错误: ' + err.message;
+        status.style.color = '#ff4444';
+        console.error(err);
+      }
+    }
+
+    // ============ 初始化 ============
+    initGyro();
+    initToolbar();
+    initTouch($('container'));
+
+    // 自动启动
+    startAR();
+  </script>
+</body>
+</html>

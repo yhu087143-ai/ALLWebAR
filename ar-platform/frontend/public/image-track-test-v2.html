@@ -1,0 +1,973 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>AR Image Track V2 - Gyro-Gated Smoothing</title>
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <style>
+    /* ───────── Reset ───────── */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; touch-action: none; font-family: 'SF Mono', 'Menlo', Monaco, Consolas, monospace; }
+    #container { width: 100vw; height: 100vh; position: relative; }
+
+    /* ───────── Status bar ───────── */
+    #status { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 100;
+      background: rgba(0,0,0,0.7); color: #fff; padding: 6px 14px; border-radius: 8px;
+      font: 12px sans-serif; white-space: nowrap; display: none; }
+
+    /* ───────── HUD (top-left overlay) ───────── */
+    #hud { position: fixed; top: 44px; left: 10px; z-index: 100;
+      background: rgba(0,0,0,0.78); color: #0f0; padding: 10px 14px; border-radius: 8px;
+      font: 11px/1.55 monospace; white-space: pre; pointer-events: none;
+      backdrop-filter: blur(4px); border: 1px solid rgba(255,255,255,0.07);
+      display: none; min-width: 210px; text-shadow: 0 0 3px rgba(0,255,0,0.3); }
+    #hud .st { color: #4ade80; }
+    #hud .sl { color: #fbbf24; }
+    #hud .fa { color: #f87171; }
+    #hud .fb { color: #a78bfa; }
+    #hud .dim { color: rgba(255,255,255,0.3); }
+    #hud .val { color: #fff; }
+
+    /* ───────── Toolbar toggle ───────── */
+    #toolbar-toggle { position: fixed; bottom: 24px; right: 24px; z-index: 200;
+      width: 48px; height: 48px; border-radius: 50%;
+      background: rgba(30,30,40,0.85); backdrop-filter: blur(8px);
+      border: 1px solid rgba(255,255,255,0.15); color: #fff; font-size: 20px; cursor: pointer;
+      display: none; align-items: center; justify-content: center;
+      transition: transform 0.2s, background 0.2s;
+      user-select: none; -webkit-tap-highlight-color: transparent; }
+    #toolbar-toggle:active { transform: scale(0.9); }
+    #toolbar-toggle.active { background: rgba(99,102,241,0.85); }
+
+    /* ───────── Toolbar panel ───────── */
+    #toolbar-panel { position: fixed; bottom: 84px; right: 24px; z-index: 199;
+      width: 290px; max-height: 65vh; overflow-y: auto;
+      background: rgba(20,20,28,0.94); backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.1); border-radius: 16px;
+      padding: 16px; display: none; color: #e0e0e0; font-size: 13px;
+      font-family: system-ui, -apple-system, sans-serif; }
+    #toolbar-panel.open { display: block; }
+    .tb-section { margin-bottom: 14px; } .tb-section:last-child { margin-bottom: 0; }
+    .tb-label { font-size: 10px; color: rgba(255,255,255,0.4); margin-bottom: 5px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; }
+    .tb-row { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+    .tb-row label { width: 12px; font-size: 10px; color: rgba(255,255,255,0.5); text-align: right; flex-shrink: 0; }
+    .tb-row input[type=range] { flex: 1; height: 4px; accent-color: #6366f1; }
+    .tb-row .val { width: 48px; text-align: right; font-size: 11px; color: rgba(255,255,255,0.5); font-variant-numeric: tabular-nums; }
+    .tb-btn { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05); color: #e0e0e0; font-size: 13px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center; gap: 6px;
+      transition: background 0.15s; user-select: none; -webkit-tap-highlight-color: transparent; }
+    .tb-btn:active { background: rgba(255,255,255,0.12); }
+
+    /* ───────── Toast ───────── */
+    #toast { position: fixed; bottom: 150px; left: 50%; transform: translateX(-50%); z-index: 300;
+      background: rgba(0,0,0,0.85); color: #fff; padding: 8px 20px; border-radius: 8px;
+      font: 13px system-ui, sans-serif; transition: opacity 0.3s; opacity: 0; pointer-events: none; }
+    #toast.show { opacity: 1; }
+
+    /* ───────── Permissions overlay ───────── */
+    #perm-overlay { position: fixed; inset: 0; z-index: 500; display: none;
+      background: rgba(0,0,0,0.85); color: #fff; align-items: center; justify-content: center;
+      flex-direction: column; gap: 20px; font-family: system-ui, sans-serif; }
+    #perm-overlay.active { display: flex; }
+    #perm-overlay p { font-size: 15px; text-align: center; max-width: 280px; line-height: 1.5; color: rgba(255,255,255,0.8); }
+    #perm-overlay button { padding: 14px 36px; border-radius: 12px; border: none;
+      background: linear-gradient(135deg, #6366f1, #8b5cf6); color: #fff; font-size: 16px; font-weight: 600;
+      cursor: pointer; box-shadow: 0 4px 20px rgba(99,102,241,0.4); }
+  </style>
+</head>
+<body>
+  <div id="status" style="display:block">Initializing...</div>
+  <div id="hud"></div>
+  <div id="container"></div>
+  <div id="toast"></div>
+
+  <button id="toolbar-toggle">&#x2699;</button>
+  <div id="toolbar-panel">
+    <div class="tb-section">
+      <div class="tb-label">Stationary Lock</div>
+      <div class="tb-row">
+        <label title="Lock frames">F</label>
+        <input type="range" id="sl-stationary-lock" min="3" max="20" step="1" value="5">
+        <span class="val" id="sl-stationary-lock-val">5</span>
+      </div>
+    </div>
+    <div class="tb-section">
+      <div class="tb-label">Damping</div>
+      <div class="tb-row">
+        <label title="Slow lambda">&lambda;s</label>
+        <input type="range" id="sl-lambda-slow" min="1" max="20" step="0.5" value="5">
+        <span class="val" id="sl-lambda-slow-val">5.0</span>
+      </div>
+      <div class="tb-row">
+        <label title="Fast lambda">&lambda;f</label>
+        <input type="range" id="sl-lambda-fast" min="10" max="80" step="1" value="40">
+        <span class="val" id="sl-lambda-fast-val">40</span>
+      </div>
+    </div>
+    <div class="tb-section">
+      <div class="tb-label">Deadzone (Fallback)</div>
+      <div class="tb-row">
+        <label title="Position">P</label>
+        <input type="range" id="sl-deadzone-pos" min="0.001" max="0.05" step="0.001" value="0.01">
+        <span class="val" id="sl-deadzone-pos-val">0.010</span>
+      </div>
+      <div class="tb-row">
+        <label title="Rotation">R</label>
+        <input type="range" id="sl-deadzone-rot" min="0.005" max="0.05" step="0.001" value="0.017">
+        <span class="val" id="sl-deadzone-rot-val">0.017</span>
+      </div>
+    </div>
+    <div class="tb-section" style="border-top:1px solid rgba(255,255,255,0.07); padding-top:12px;">
+      <button class="tb-btn" id="btn-reset" style="color:#f87171;">&#x21BA; Reset Defaults</button>
+    </div>
+  </div>
+
+  <div id="perm-overlay">
+    <p>Motion sensors are needed for gyro-gated smoothing.<br>Tap below to enable.</p>
+    <button id="btn-perm-gyro">Enable Motion Sensors</button>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.157.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.157.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <script type="module">
+  // ════════════════════════════════════════════════════════════════════
+  // AR Image Track Test V2 - Gyro-Gated Three-State Smoothing
+  // ════════════════════════════════════════════════════════════════════
+  //
+  // Core Algorithm: Three-State Gyro-Gated Smoothing
+  //
+  //   Use an independent gyroscope sensor to detect phone motion.
+  //   Based on gyro angular velocity (rad/frame), gate the smoothing:
+  //
+  //   gyroDelta (rad between consecutive gyro quaternions)
+  //     │
+  //     ├─ < stationaryThreshold for lockFrames → STATIONARY
+  //     │    Position: LOCK (never update smoothPos)
+  //     │    Rotation: micro-adjust (slerp alpha=0.02)
+  //     │    Goal: zero drift, zero jitter during stillness
+  //     │
+  //     ├─ < 0.01 → SLOW_MOVE
+  //     │    lambda=5 damping, frame-rate-independent
+  //     │    smoothPos.lerp(rawPos, 1 - exp(-lambda * dt))
+  //     │    smoothQuat.slerp(rawQuat, 1 - exp(-lambda * dt))
+  //     │
+  //     └─ >= 0.01 → FAST_MOVE
+  //          lambda=40 damping, same formula
+  //          Low latency for quick movements
+  //
+  //   On stationary EXIT: first frame uses lambda=40 (fast catch-up)
+  //   to snap to correct position, preventing lag-on-release.
+  //
+  //   Fallback (no gyro): simple lerp/slerp alpha=0.15 + deadzone.
+  //
+  // ════════════════════════════════════════════════════════════════════
+
+  import { MindARThree } from 'https://cdn.jsdelivr.net/npm/mind-ar@1.2.2/dist/mindar-image-three.prod.js';
+  import * as THREE from 'three';
+
+  // ───────── DOM shortcuts ─────────
+  const $ = id => document.getElementById(id);
+  const statusEl = $('status');
+  const hudEl = $('hud');
+  const toastEl = $('toast');
+  const panelToggle = $('toolbar-toggle');
+  const panel = $('toolbar-panel');
+  const permOverlay = $('perm-overlay');
+  const btnPerm = $('btn-perm-gyro');
+
+  let toastTimer;
+  function showToast(msg) {
+    toastEl.textContent = msg; toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2000);
+  }
+
+  // ───────── Config (tunable via toolbar) ─────────
+  const CFG = {
+    stationaryLockFrames: 5,       // consecutive frames below threshold to lock
+    dampingSlow: 5,                // lambda for SLOW_MOVE
+    dampingFast: 40,               // lambda for FAST_MOVE
+    deadzonePos: 0.01,             // meters, for FALLBACK mode
+    deadzoneRot: 0.017,            // radians (~1 deg), for FALLBACK mode
+  };
+
+  // ───────── Global state ─────────
+  const S = {
+    // ---- Gyro ----
+    gyroQuat: new THREE.Quaternion(),
+    prevGyroQuat: null,
+    gyroDelta: 0,
+    gyroAvailable: false,
+    gyroLastNonZero: 0.001,       // hold last non-zero to avoid false stationary when sensor stalls
+
+    // ---- Three-state machine ----
+    // States: 'STATIONARY' | 'SLOW_MOVE' | 'FAST_MOVE' | 'FALLBACK' | 'INIT'
+    motionState: 'INIT',
+    stationaryFrameCount: 0,
+    justExitedStationary: false,  // true on first frame after leaving STATIONARY
+
+    // ---- Smooth pose ----
+    smoothPos: new THREE.Vector3(),
+    smoothQuat: new THREE.Quaternion(),
+    smoothReady: false,
+
+    // ---- Stationary lock ----
+    lockedPos: new THREE.Vector3(),
+    lockedQuat: new THREE.Quaternion(),
+    microRotQuat: new THREE.Quaternion(),
+
+    // ---- Raw tracking from MindAR ----
+    trackPos: new THREE.Vector3(),
+    trackQuat: new THREE.Quaternion(),
+    trackScl: new THREE.Vector3(),
+    tempMatrix: new THREE.Matrix4(),
+    tempVec3: new THREE.Vector3(),
+
+    // ---- Lost-tracking handling ----
+    tracking: false,
+    lostFrameCount: 0,
+    maxLostFrames: 15,
+    lastGoodPos: new THREE.Vector3(),
+    lastGoodQuat: new THREE.Quaternion(),
+    trackingConfidence: 0,  // smoothed 0-1
+
+    // ---- Inverse depth + Heuristic confidence ----
+    invDepth: 1,
+    rawInvDepth: 1,
+    poseConfidence: 0.5,
+    prevConfTrackPos: new THREE.Vector3(),
+    // ---- Adaptive thresholds + Bounciness ----
+    gyroRunningMean: 0.001,
+    gyroRunningStd: 0.001,
+    bounciness: 0,
+    prevPosSignX: 0,
+    prevPosSignY: 0,
+    prevPosSignZ: 0,
+
+    // ---- Cross-fade 重新捕获 ----
+    blendActive: false,
+    blendFrames: 0,
+    blendFromPos: new THREE.Vector3(),
+    blendFromQuat: new THREE.Quaternion(),
+    isReacquisition: false,
+    hasEverTracked: false,
+    BLEND_TOTAL_FRAMES: 10,
+
+    // ---- FPS ----
+    prevTimestamp: 0,
+    fpsSmoothed: 60,
+    frameCount: 0,
+
+    // ---- MindAR refs ----
+    mindAR: null,
+    anchor: null,
+    container: null,
+  };
+
+  // ════════════════════════════════════════════════════════════════════
+  // GYROSCOPE INITIALIZATION (3 tiers, same approach as V3)
+  // ════════════════════════════════════════════════════════════════════
+  //
+  // Tier 1: WebXR inline+local (drift-free, ARCore devices)
+  // Tier 2: RelativeOrientationSensor (Chrome Android)
+  // Tier 3: DeviceOrientationEvent (universal fallback)
+  //
+  // ════════════════════════════════════════════════════════════════════
+
+  async function initGyro() {
+    // ── Tier 1: WebXR (drift-free, best quality) ──
+    if (navigator.xr) {
+      try {
+        const supported = await navigator.xr.isSessionSupported('inline');
+        if (supported) {
+          const session = await navigator.xr.requestSession('inline', {
+            requiredFeatures: ['local']
+          });
+          const space = await session.requestReferenceSpace('local');
+          const viewerPoseSpace = space;
+
+          function onXRFrame(time, xrFrame) {
+            const pose = xrFrame.getViewerPose(viewerPoseSpace);
+            if (pose && pose.transform) {
+              const { orientation } = pose.transform;
+              if (orientation) {
+                S.gyroQuat.set(orientation.x, orientation.y, orientation.z, orientation.w);
+                S.gyroAvailable = true;
+              }
+            }
+            session.requestAnimationFrame(onXRFrame);
+          }
+          session.requestAnimationFrame(onXRFrame);
+          console.log('[Gyro] Tier 1: WebXR inline+local active');
+          return;
+        }
+      } catch (e) {
+        console.warn('[Gyro] Tier 1 failed:', e.message);
+      }
+    }
+
+    // ── Tier 2: RelativeOrientationSensor (Chrome Android) ──
+    let rosFailed = false;
+    if (typeof RelativeOrientationSensor !== 'undefined') {
+      try {
+        const sensor = new RelativeOrientationSensor({ frequency: 60, referenceFrame: 'device' });
+        sensor.addEventListener('reading', () => {
+          const q = sensor.quaternion;
+          if (q) {
+            S.gyroQuat.set(q[0], q[1], q[2], q[3]);
+            S.gyroAvailable = true;
+          }
+        });
+        sensor.addEventListener('error', (e) => {
+          console.warn('[Gyro] ROS error:', e.error?.name || e.message);
+          rosFailed = true;
+        });
+        sensor.start();
+        // 给传感器 300ms 确认是否成功启动，失败则继续回退到 Tier 3
+        await new Promise(r => setTimeout(r, 300));
+        if (!rosFailed) {
+          console.log('[Gyro] Tier 2: RelativeOrientationSensor active');
+          return;
+        }
+        console.warn('[Gyro] ROS started but errored, falling through to Tier 3');
+      } catch (e) {
+        console.warn('[Gyro] Tier 2 failed:', e.message);
+      }
+    }
+
+    // ── Tier 3: DeviceOrientationEvent (universal) ──
+    if (window.DeviceOrientationEvent) {
+      // iOS 13+ requires user gesture to request permission
+      if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+        console.log('[Gyro] Tier 3: DeviceOrientationEvent needs permission');
+        // Show permission overlay; the user must tap to enable
+        permOverlay.classList.add('active');
+        return new Promise((resolve) => {
+          btnPerm.onclick = async () => {
+            try {
+              const result = await DeviceOrientationEvent.requestPermission();
+              if (result === 'granted') {
+                window.addEventListener('deviceorientation', onDeviceOrientation);
+                S.gyroAvailable = true;
+                permOverlay.classList.remove('active');
+                console.log('[Gyro] Tier 3: permission granted');
+              } else {
+                console.warn('[Gyro] Permission denied');
+                permOverlay.querySelector('p').textContent = 'Motion permission denied. Running in FALLBACK mode.';
+                setTimeout(() => permOverlay.classList.remove('active'), 2000);
+              }
+            } catch (e) {
+              console.warn('[Gyro] Permission error:', e);
+              permOverlay.classList.remove('active');
+            }
+            resolve();
+          };
+        });
+      } else {
+        // Android or other — just listen
+        window.addEventListener('deviceorientation', onDeviceOrientation);
+        S.gyroAvailable = true;
+        console.log('[Gyro] Tier 3: DeviceOrientationEvent active');
+      }
+    } else {
+      console.warn('[Gyro] No gyro sensors available — using FALLBACK mode');
+    }
+  }
+
+  // Shared handler for DeviceOrientationEvent (Tier 3).
+  function onDeviceOrientation(e) {
+    // Some devices fire one event with all-null values before real data.
+    if (e.alpha === null || e.beta === null || e.gamma === null) return;
+    const a = THREE.MathUtils.degToRad(e.alpha || 0);
+    const b = THREE.MathUtils.degToRad(e.beta || 0);
+    const g = THREE.MathUtils.degToRad(e.gamma || 0);
+    S.gyroQuat.setFromEuler(new THREE.Euler(b, g, a, 'YXZ'));
+    S.gyroAvailable = true;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // STATE MACHINE — Three-State Gyro Gate
+  // ════════════════════════════════════════════════════════════════════
+  //
+  // Compute gyroDelta = angular distance between current and previous
+  // gyro quaternion. Then determine the motion state.
+  //
+  // Transition rules:
+  //   gyroDelta < threshold for lockFrames  → STATIONARY (position lock)
+  //   gyroDelta < fastThresh (adaptive)     → SLOW_MOVE
+  //   gyroDelta >= fastThresh                → FAST_MOVE
+  //   No gyro available                     → FALLBACK
+  //
+  // ════════════════════════════════════════════════════════════════════
+
+  function computeGyroDelta() {
+    if (!S.gyroAvailable || !S.prevGyroQuat) return 0;
+    const angle = S.gyroQuat.angleTo(S.prevGyroQuat);
+    // Guard: if the sensor stalls (angle=0), reuse last non-zero to
+    // avoid falsely detecting STATIONARY.
+    if (angle > 1e-8) {
+      S.gyroLastNonZero = angle;
+      return angle;
+    }
+    return S.gyroLastNonZero;
+  }
+
+  function updateMotionState() {
+    const prevState = S.motionState;
+    const delta = S.gyroDelta;
+
+    // ── FALLBACK: no gyro, use simple filter ──
+    if (!S.gyroAvailable) {
+      S.motionState = 'FALLBACK';
+      S.stationaryFrameCount = 0;
+      S.justExitedStationary = false;
+      return;
+    }
+
+    // ── Adaptive thresholds from running gyro statistics ──
+    const statThresh = Math.max(S.gyroRunningMean + S.gyroRunningStd * 0.5, 0.0003);
+    const fastThresh = Math.max(S.gyroRunningMean + S.gyroRunningStd * 2.0, 0.003);
+
+    // ── Determine new state from gyro delta ──
+    let newState;
+    if (delta < statThresh) {
+      // Within stationary threshold: accumulate frames toward lock.
+      S.stationaryFrameCount++;
+      if (S.stationaryFrameCount >= CFG.stationaryLockFrames) {
+        newState = 'STATIONARY';
+      } else {
+        // Pre-lock accumulation: treat as slow move (gentle filtering)
+        newState = 'SLOW_MOVE';
+      }
+    } else if (delta < fastThresh) {
+      // Moderate movement
+      S.stationaryFrameCount = 0;
+      newState = 'SLOW_MOVE';
+    } else {
+      // Fast movement
+      S.stationaryFrameCount = 0;
+      newState = 'FAST_MOVE';
+    }
+
+    // ── Stationary ENTRY: lock the current smooth position ──
+    if (newState === 'STATIONARY' && prevState !== 'STATIONARY') {
+      S.lockedPos.copy(S.smoothPos);
+      S.lockedQuat.copy(S.smoothQuat);
+      S.microRotQuat.identity();
+      console.log(`[STATE] ENTER STATIONARY | gyroDelta=${delta.toFixed(6)} thresh=${statThresh.toFixed(6)}`);
+    }
+
+    // ── Stationary EXIT: flag fast catch-up for next smoothing frame ──
+    if (prevState === 'STATIONARY' && newState !== 'STATIONARY') {
+      S.justExitedStationary = true;
+      console.log(`[STATE] EXIT STATIONARY → ${newState} | gyroDelta=${delta.toFixed(6)} thresh=${fastThresh.toFixed(6)}`);
+    }
+
+    S.motionState = newState;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // SMOOTHING — Apply Three-State Gyro-Gated Smoothing
+  // ════════════════════════════════════════════════════════════════════
+
+  function applySmoothing(dt) {
+    // Read raw tracking pose from MindAR's anchor group matrix.
+    S.anchor.group.matrix.decompose(S.trackPos, S.trackQuat, S.trackScl);
+
+    // ── Validate tracking data ──
+    const validTracking = S.tracking
+      && isFinite(S.trackPos.x) && isFinite(S.trackPos.y) && isFinite(S.trackPos.z)
+      && S.trackPos.lengthSq() > 1e-8;  // non-zero position
+
+    if (!validTracking) {
+      // ── Lost tracking ──
+      S.lostFrameCount++;
+      S.trackingConfidence = Math.max(0, S.trackingConfidence - 0.08);
+
+      if (S.lostFrameCount <= S.maxLostFrames) {
+        // Hold last good position (don't update smooth values).
+        // We also decay the confidence shown in the HUD.
+        // smoothPos / smoothQuat keep their last-good values.
+      } else {
+        // Frozen after maxLostFrames — stop everything.
+        // smoothPos stays wherever it was.
+      }
+
+      // Always compose the matrix from our last known smooth pose
+      // so the AR content stays in place.
+      S.tempMatrix.identity().compose(S.smoothPos, S.smoothQuat, S.trackScl);
+      S.anchor.group.matrix.copy(S.tempMatrix);
+      return;
+    }
+
+    // ── Valid tracking — reset lost counter ──
+    S.lostFrameCount = 0;
+    S.trackingConfidence = Math.min(1, S.trackingConfidence + 0.25);
+
+    // ── First frame — initialize smooth values ──
+    if (!S.smoothReady) {
+      S.lockedPos.copy(S.trackPos);
+      S.invDepth = 1 / Math.max(S.trackPos.z, 0.1);
+      S.rawInvDepth = S.invDepth;
+      S.smoothReady = true;
+      S.hasEverTracked = true;
+
+      if (S.isReacquisition) {
+        // Cross-fade 重新捕获
+        S.blendFromPos.copy(S.smoothPos);
+        S.blendFromQuat.copy(S.smoothQuat);
+        S.blendActive = true;
+        S.blendFrames = 0;
+        S.isReacquisition = false;
+        S.tempMatrix.identity().compose(S.smoothPos, S.smoothQuat, S.trackScl);
+      } else {
+        S.smoothPos.copy(S.trackPos);
+        S.smoothQuat.copy(S.trackQuat);
+        S.tempMatrix.identity().compose(S.smoothPos, S.smoothQuat, S.trackScl);
+      }
+
+      S.anchor.group.matrix.copy(S.tempMatrix);
+      return;
+    }
+
+    // ── Frame dt (must be before anything using it) ──
+    const dtClamped = Math.max(dt, 0.001); // prevent division by zero
+
+    // ── Heuristic confidence estimation ──
+    const posDelta = S.trackPos.distanceTo(S.prevConfTrackPos);
+    S.prevConfTrackPos.copy(S.trackPos);
+    const gyroExpectedDelta = Math.max(S.gyroDelta * 0.000833 / dtClamped, 0.0001);
+    const consistency = 1 - Math.min(posDelta / gyroExpectedDelta, 1);
+    S.poseConfidence = S.poseConfidence * 0.7 + consistency * 0.3;
+
+    // ── Bounciness: PnP 方向翻转频率（高频振荡时即使幅值小也不可信） ──
+    const sx = Math.sign(S.trackPos.x - S.prevConfTrackPos.x);
+    const sy = Math.sign(S.trackPos.y - S.prevConfTrackPos.y);
+    const sz = Math.sign(S.trackPos.z - S.prevConfTrackPos.z);
+    let flipCount = 0;
+    if (sx !== 0 && sx !== S.prevPosSignX) flipCount++;
+    if (sy !== 0 && sy !== S.prevPosSignY) flipCount++;
+    if (sz !== 0 && sz !== S.prevPosSignZ) flipCount++;
+    S.prevPosSignX = sx;
+    S.prevPosSignY = sy;
+    S.prevPosSignZ = sz;
+    S.bounciness += 0.15 * (flipCount / 3 - S.bounciness);
+    const effectiveConf = S.poseConfidence * (1 - S.bounciness * 0.5);
+
+    // ── Apply per-state smoothing ──
+    switch (S.motionState) {
+      // ═══ STATIONARY: position locked, micro rotation only ═══
+      case 'STATIONARY': {
+        // Position: LOCKED — never update from raw tracking.
+        S.smoothPos.copy(S.lockedPos);
+
+        // Rotation: micro-adjust only (slerp alpha=0.02).
+        // This provides minimal jitter correction without drift.
+        S.microRotQuat.copy(S.smoothQuat);
+        S.smoothQuat.slerp(S.trackQuat, 0.02);
+        break;
+      }
+
+      // ═══ SLOW_MOVE: gentle damping ═══
+      case 'SLOW_MOVE': {
+        const lambda = S.justExitedStationary ? 40 : CFG.dampingSlow;
+        S.justExitedStationary = false;
+        const damp = 1 - Math.exp(-lambda * dtClamped);
+        // X/Y 用正常阻尼
+        S.smoothPos.x += (S.trackPos.x - S.smoothPos.x) * damp;
+        S.smoothPos.y += (S.trackPos.y - S.smoothPos.y) * damp;
+        // Z 轴逆深度 + 置信度自适应阻尼 + 距离感知
+        const distSlow = Math.min(0.5 / Math.max(S.trackPos.z, 0.1), 1.0);
+        const zSlowFactor = 0.3 * (0.5 + effectiveConf * 0.5) * distSlow;
+        S.rawInvDepth = 1 / Math.max(S.trackPos.z, 0.1);
+        S.invDepth += (S.rawInvDepth - S.invDepth) * damp * zSlowFactor;
+        S.smoothPos.z = 1 / S.invDepth;
+        S.smoothQuat.slerp(S.trackQuat, damp);
+        break;
+      }
+
+      // ═══ FAST_MOVE: aggressive damping, low latency ═══
+      case 'FAST_MOVE': {
+        const lambda = S.justExitedStationary ? 40 : CFG.dampingFast;
+        S.justExitedStationary = false;
+
+        const damp = 1 - Math.exp(-lambda * dtClamped);
+        // X/Y 用正常阻尼
+        S.smoothPos.x += (S.trackPos.x - S.smoothPos.x) * damp;
+        S.smoothPos.y += (S.trackPos.y - S.smoothPos.y) * damp;
+        // Z 轴逆深度 + 置信度自适应阻尼 + 距离感知
+        const distFast = Math.min(0.5 / Math.max(S.trackPos.z, 0.1), 1.0);
+        const zFastFactor = 0.5 * (0.5 + effectiveConf * 0.5) * distFast;
+        S.rawInvDepth = 1 / Math.max(S.trackPos.z, 0.1);
+        S.invDepth += (S.rawInvDepth - S.invDepth) * damp * zFastFactor;
+        S.smoothPos.z = 1 / S.invDepth;
+        S.smoothQuat.slerp(S.trackQuat, damp);
+        break;
+      }
+
+      // ═══ FALLBACK: no gyro, simple lerp + deadzone ═══
+      case 'FALLBACK': {
+        S.justExitedStationary = false;
+
+        const posDist = S.trackPos.distanceTo(S.smoothPos);
+        const rotAngle = S.smoothQuat.angleTo(S.trackQuat);
+
+        // X/Y 全局死区
+        if (posDist > CFG.deadzonePos) {
+          S.smoothPos.x += (S.trackPos.x - S.smoothPos.x) * 0.15;
+          S.smoothPos.y += (S.trackPos.y - S.smoothPos.y) * 0.15;
+        }
+        // Z 独立死区（更保守）
+        const zDist = Math.abs(S.trackPos.z - S.smoothPos.z);
+        if (zDist > 0.02) {
+          S.smoothPos.z += (S.trackPos.z - S.smoothPos.z) * 0.10;
+        }
+        if (rotAngle > CFG.deadzoneRot) {
+          S.smoothQuat.slerp(S.trackQuat, 0.15);
+        }
+        break;
+      }
+
+      default:
+        break;
+    }
+
+    // ── Cross-fade 重新捕获过渡 ──
+    if (S.blendActive) {
+      const blendT = Math.min(S.blendFrames / S.BLEND_TOTAL_FRAMES, 1);
+      const easeT = blendT * blendT;
+      S.smoothPos.lerpVectors(S.blendFromPos, S.smoothPos, easeT);
+      S.smoothQuat.slerpQuaternions(S.blendFromQuat, S.smoothQuat, easeT);
+      S.blendFrames++;
+      if (blendT >= 1) S.blendActive = false;
+    }
+
+    // ── Compose smoothed matrix and write back to anchor group ──
+    S.tempMatrix.identity().compose(S.smoothPos, S.smoothQuat, S.trackScl);
+    S.anchor.group.matrix.copy(S.tempMatrix);
+    S.anchor.group.matrixWorldNeedsUpdate = true;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // HUD — Real-time Debug Overlay
+  // ════════════════════════════════════════════════════════════════════
+
+  function updateHUD() {
+    const state = S.motionState;
+    let stateClass, stateLabel;
+    switch (state) {
+      case 'STATIONARY': stateClass = 'st'; stateLabel = 'STATIONARY';  break;
+      case 'SLOW_MOVE':  stateClass = 'sl'; stateLabel = 'SLOW_MOVE';   break;
+      case 'FAST_MOVE':  stateClass = 'fa'; stateLabel = 'FAST_MOVE';   break;
+      case 'FALLBACK':   stateClass = 'fb'; stateLabel = 'FALLBACK';    break;
+      default:           stateClass = 'dim'; stateLabel = state;        break;
+    }
+
+    hudEl.innerHTML =
+      `state  <span class="${stateClass}">${stateLabel}</span>\n` +
+      `delta  <span class="val">${S.gyroDelta.toFixed(6)}</span> <span class="dim">rad/frm</span>\n` +
+      `cnt    <span class="val">${S.stationaryFrameCount}</span><span class="dim">/${CFG.stationaryLockFrames}</span>\n` +
+      `conf   <span class="val">${S.trackingConfidence.toFixed(2)}</span>\n` +
+      `pconf  <span class="val">${S.poseConfidence.toFixed(2)}</span>\n` +
+      `bnce   <span class="val">${S.bounciness.toFixed(2)}</span>\n` +
+      `thresh <span class="val">${S.gyroRunningMean.toFixed(5)}±${S.gyroRunningStd.toFixed(5)}</span>\n` +
+      `invZ   <span class="val">${S.invDepth.toFixed(3)}</span>\n` +
+      `blend  <span class="${S.blendActive ? 'st' : 'dim'}">${S.blendActive ? `ACTIVE ${Math.min(S.blendFrames/S.BLEND_TOTAL_FRAMES,1)*100}%` : 'OFF'}</span>\n` +
+      `fps    <span class="val">${S.fpsSmoothed.toFixed(1)}</span>\n` +
+      `gyro   <span class="${S.gyroAvailable ? 'st' : 'fb'}">${S.gyroAvailable ? 'YES' : 'NO'}</span>\n` +
+      `track  <span class="${S.tracking ? 'st' : 'fb'}">${S.tracking ? 'FOUND' : 'LOST'}</span> <span class="dim">lost=${S.lostFrameCount}</span>`;
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // TOOLBAR — Sliders & Controls
+  // ════════════════════════════════════════════════════════════════════
+
+  function initToolbar() {
+    let open = false;
+    panelToggle.addEventListener('click', () => {
+      open = !open;
+      panel.classList.toggle('open', open);
+      panelToggle.classList.toggle('active', open);
+    });
+
+    // Wire up each slider to its config value and display.
+    function bindSlider(id, cfgKey, toFixed = 4) {
+      const el = $(id);
+      const valEl = $(id + '-val');
+      el.addEventListener('input', () => {
+        const v = parseFloat(el.value);
+        valEl.textContent = v.toFixed(toFixed);
+        CFG[cfgKey] = v;
+      });
+    }
+    bindSlider('sl-stationary-lock', 'stationaryLockFrames', 0);
+    bindSlider('sl-lambda-slow', 'dampingSlow', 1);
+    bindSlider('sl-lambda-fast', 'dampingFast', 0);
+    bindSlider('sl-deadzone-pos', 'deadzonePos', 3);
+    bindSlider('sl-deadzone-rot', 'deadzoneRot', 3);
+
+    // Reset button
+    $('btn-reset').addEventListener('click', resetDefaults);
+  }
+
+  function resetDefaults() {
+    const defaults = {
+      'sl-stationary-lock': 5,
+      'sl-lambda-slow': 5,
+      'sl-lambda-fast': 40,
+      'sl-deadzone-pos': 0.01,
+      'sl-deadzone-rot': 0.017,
+    };
+    for (const [id, val] of Object.entries(defaults)) {
+      const el = $(id);
+      const valEl = $(id + '-val');
+      el.value = String(val);
+      const toFixed = id === 'sl-stationary-lock' ? 0
+        : id === 'sl-lambda-slow' ? 1
+        : id === 'sl-lambda-fast' ? 0
+        : 3;
+      valEl.textContent = parseFloat(val).toFixed(toFixed);
+    }
+    // Sync CFG
+    CFG.stationaryLockFrames = defaults['sl-stationary-lock'];
+    CFG.dampingSlow = defaults['sl-lambda-slow'];
+    CFG.dampingFast = defaults['sl-lambda-fast'];
+    CFG.deadzonePos = defaults['sl-deadzone-pos'];
+    CFG.deadzoneRot = defaults['sl-deadzone-rot'];
+    showToast('Defaults restored');
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // MAIN — MindAR Setup & Render Loop
+  // ════════════════════════════════════════════════════════════════════
+
+  async function startAR() {
+    try {
+      statusEl.textContent = 'Starting AR...';
+      statusEl.style.color = '#fff';
+
+      const container = $('container');
+      S.container = container;
+
+      // ── Camera permission (required on some mobile browsers) ──
+      try {
+        const tempStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment', width: 640, height: 480 }
+        });
+        tempStream.getTracks().forEach(t => t.stop());
+      } catch (permErr) {
+        statusEl.textContent = 'Camera permission required. Please allow and refresh.';
+        statusEl.style.color = '#ff4444';
+        console.error('[AR] Camera permission denied:', permErr);
+        return;
+      }
+
+      // ── Initialize gyroscope after user gesture (if needed for iOS) ──
+      await initGyro();
+
+      // ── Create MindAR instance ──
+      S.mindAR = new MindARThree({
+        container,
+        imageTargetSrc: '/uploads/target_1778996220812_krx3ct.mind',
+        filterMinCF: 0.001,
+        filterBeta: 1000,
+        missTolerance: 15,
+        warmupTolerance: 5,
+      });
+
+      const { renderer, scene, camera } = S.mindAR;
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+      // ── Lighting ──
+      const ambient = new THREE.AmbientLight(0xffffff, 1.0);
+      scene.add(ambient);
+      const dirLight = new THREE.DirectionalLight(0xffffff, 1.5);
+      dirLight.position.set(1, 2, 1);
+      scene.add(dirLight);
+
+      // ── Anchor ──
+      S.anchor = S.mindAR.addAnchor(0);
+
+      // ── Video Plane (AR Content) ──
+      // Create a hidden video element for the texture source.
+      const video = document.createElement('video');
+      // Set crossOrigin before src (some browsers need this for WebGL tex).
+      video.crossOrigin = 'anonymous';
+      video.muted = true;
+      video.loop = true;
+      video.playsInline = true;
+      video.setAttribute('playsinline', '');
+      video.setAttribute('webkit-playsinline', '');
+      video.src = '/uploads/video_3beb47.mp4';
+      video.style.display = 'none';
+      document.body.appendChild(video);
+
+      // Create video texture and plane.
+      const videoTex = new THREE.VideoTexture(video);
+      videoTex.minFilter = THREE.LinearFilter;
+      videoTex.magFilter = THREE.LinearFilter;
+
+      // Unit plane; scaled by aspect ratio after metadata loads.
+      const VIDEO_HEIGHT = 0.5; // meters in AR space
+      const planeGeom = new THREE.PlaneGeometry(1, 1);
+      const planeMat = new THREE.MeshBasicMaterial({
+        map: videoTex,
+        side: THREE.DoubleSide,
+        toneMapped: false,  // keep original video colors
+      });
+      const planeMesh = new THREE.Mesh(planeGeom, planeMat);
+      planeMesh.position.set(0, 0, 0);   // centered on the image target
+      S.anchor.group.add(planeMesh);
+
+      // Update plane aspect ratio when video metadata is available.
+      // Use unit 1x1 geometry and scale the mesh for proper aspect.
+      const initialAspect = 1;
+      planeMesh.scale.set(VIDEO_HEIGHT * initialAspect, VIDEO_HEIGHT, 1);
+      video.addEventListener('loadedmetadata', () => {
+        const aspect = (video.videoWidth / video.videoHeight) || 1;
+        planeMesh.scale.set(VIDEO_HEIGHT * aspect, VIDEO_HEIGHT, 1);
+        console.log(`[Video] Loaded: ${video.videoWidth}x${video.videoHeight}, aspect=${aspect.toFixed(2)}, scale=(${(VIDEO_HEIGHT*aspect).toFixed(3)}, ${VIDEO_HEIGHT}, 1)`);
+      });
+
+      // Start video playback (muted autoplay should work on most mobile browsers).
+      const playPromise = video.play();
+      if (playPromise) {
+        playPromise.catch(() => {
+          // Autoplay blocked — add a listener on first user interaction.
+          console.warn('[Video] Autoplay blocked, waiting for interaction');
+          const resumeVideo = () => {
+            video.play().catch(() => {});
+            document.removeEventListener('touchstart', resumeVideo);
+            document.removeEventListener('click', resumeVideo);
+          };
+          document.addEventListener('touchstart', resumeVideo);
+          document.addEventListener('click', resumeVideo);
+        });
+      }
+
+      // ── Placeholder cube (visible until video loads) ──
+      const placeholder = new THREE.Mesh(
+        new THREE.BoxGeometry(0.15, 0.15, 0.15),
+        new THREE.MeshStandardMaterial({ color: 0x6366f1, transparent: true, opacity: 0.5 })
+      );
+      placeholder.position.set(0, 0, 0);
+      S.anchor.group.add(placeholder);
+
+      // Remove placeholder once video starts playing.
+      video.addEventListener('playing', () => {
+        S.anchor.group.remove(placeholder);
+        placeholder.geometry.dispose();
+        placeholder.material.dispose();
+      }, { once: true });
+
+      // ── MindAR callbacks ──
+      S.anchor.onTargetFound = () => {
+        S.tracking = true;
+        S.lostFrameCount = 0;
+        S.isReacquisition = S.hasEverTracked;
+        S.smoothReady = false;  // re-init smooth on re-acquisition
+        statusEl.textContent = 'Target FOUND';
+        statusEl.style.color = '#4ade80';
+        console.log('[Tracking] Target FOUND');
+      };
+
+      S.anchor.onTargetLost = () => {
+        S.tracking = false;
+        S.lostFrameCount = 0;
+        statusEl.textContent = 'Target LOST (holding...)';
+        statusEl.style.color = '#fbbf24';
+        console.log('[Tracking] Target LOST');
+      };
+
+      // ── Start MindAR ──
+      await S.mindAR.start();
+
+      // ── Fix camera projection for full viewport ──
+      const proj = camera.projectionMatrix.elements;
+      const vFov = THREE.MathUtils.radToDeg(2 * Math.atan(1 / Math.abs(proj[5])));
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      camera.fov = vFov;
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, h);
+
+      // ── Show UI ──
+      statusEl.textContent = 'Scanning for target...';
+      statusEl.style.color = '#fbbf24';
+      hudEl.style.display = 'block';
+      panelToggle.style.display = 'flex';
+
+      // ── Animation / Render Loop ──
+      S.prevTimestamp = performance.now();
+
+      renderer.setAnimationLoop((timestamp) => {
+        // Delta time in seconds.
+        const dtSec = S.prevTimestamp > 0
+          ? (timestamp - S.prevTimestamp) / 1000
+          : 0.016;
+        S.prevTimestamp = timestamp;
+
+        // Smoothed FPS
+        const instantFps = dtSec > 0 ? 1 / dtSec : 60;
+        S.fpsSmoothed = S.fpsSmoothed * 0.95 + instantFps * 0.05;
+
+        // 0. Compute gyro delta (independent of MindAR tracking)
+        S.gyroDelta = computeGyroDelta();
+
+        // 0a. Adaptive threshold — gyro running EMA statistics
+        const gDiff = S.gyroDelta - S.gyroRunningMean;
+        S.gyroRunningMean += 0.05 * gDiff;
+        S.gyroRunningStd = Math.sqrt(
+          (1 - 0.05) * (S.gyroRunningStd * S.gyroRunningStd + 0.05 * gDiff * gDiff)
+        );
+        S.gyroRunningStd = Math.max(S.gyroRunningStd, 0.0001);
+
+        // 1. Update three-state machine based on gyro
+        updateMotionState();
+
+        // 2. Apply per-state smoothing to anchor group matrix
+        applySmoothing(dtSec);
+
+        // 3. Update HUD
+        updateHUD();
+
+        // 4. Render
+        renderer.render(scene, camera);
+
+        // 5. Save gyro quat for next frame's delta calculation
+        S.prevGyroQuat = S.gyroQuat.clone();
+
+        S.frameCount++;
+      });
+
+    } catch (err) {
+      statusEl.textContent = 'Error: ' + (err.message || err);
+      statusEl.style.color = '#ff4444';
+      console.error('[AR] Fatal error:', err);
+    }
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // BOOT
+  // ════════════════════════════════════════════════════════════════════
+
+  initToolbar();
+
+  // Automatically start AR when the page loads.
+  startAR();
+
+  // Log timestamp for diagnostics.
+  console.log(`[Boot] image-track-test-v2 loaded at ${new Date().toISOString()}`);
+  </script>
+</body>
+</html>

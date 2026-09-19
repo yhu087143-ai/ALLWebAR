@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>8th Wall SLAM Test</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#000;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,sans-serif;touch-action:none}
+  canvas{display:block;width:100vw;height:100vh}
+
+  .overlay{position:absolute;inset:0;z-index:20;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,.88);color:#e2e8f0;padding:24px;text-align:center;transition:opacity .5s}
+  .overlay.hidden{opacity:0;pointer-events:none}
+  .spinner{width:44px;height:44px;border-radius:50%;border:3px solid rgba(99,102,241,.2);border-top-color:#818cf8;animation:spin .8s linear infinite;margin-bottom:18px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  .s{font-size:15px;font-weight:500;margin-bottom:6px}
+  .d{font-size:13px;color:#94a3b8;max-width:340px;line-height:1.5}
+  .e{font-size:13px;color:#f87171;margin-top:10px;max-width:340px;line-height:1.4}
+
+  .hud{position:absolute;top:0;left:0;right:0;z-index:10;padding:12px;display:none;justify-content:space-between}
+  .hud.v{display:flex}
+  .badge{padding:5px 12px;border-radius:16px;font-size:11px;font-weight:500;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.08);color:#cbd5e1}
+  .badge.on{border-color:rgba(34,197,94,.35);color:#4ade80}
+  .badge.off{border-color:rgba(234,179,8,.35);color:#eab308}
+  .badge.err{border-color:rgba(248,113,113,.35);color:#f87171}
+
+  .guide{position:absolute;inset:0;z-index:5;pointer-events:none;display:none;align-items:center;justify-content:center}
+  .guide.v{display:flex}
+  .gf{position:relative;width:200px;height:200px}
+  .gf .c{position:absolute;width:32px;height:32px;border-color:rgba(129,140,248,.5);border-style:solid}
+  .gf .c.tl{top:0;left:0;border-width:2px 0 0 2px;border-radius:6px 0 0 0}
+  .gf .c.tr{top:0;right:0;border-width:2px 2px 0 0;border-radius:0 6px 0 0}
+  .gf .c.bl{bottom:0;left:0;border-width:0 0 2px 2px;border-radius:0 0 0 6px}
+  .gf .c.br{bottom:0;right:0;border-width:0 2px 2px 0;border-radius:0 0 6px 0}
+  .gl{position:absolute;bottom:-36px;left:0;right:0;text-align:center;color:rgba(226,232,240,.6);font-size:12px}
+
+  .bar{position:absolute;bottom:44px;left:0;right:0;z-index:10;display:none;justify-content:center;gap:12px;padding:0 20px}
+  .bar.v{display:flex}
+  .btn{padding:10px 22px;border-radius:28px;font-size:13px;font-weight:500;background:rgba(0,0,0,.55);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.1);color:#e2e8f0;cursor:pointer;transition:all .15s;touch-action:manipulation;-webkit-tap-highlight-color:transparent;user-select:none}
+  .btn:active{transform:scale(.95);background:rgba(255,255,255,.08)}
+
+  .toast{position:absolute;bottom:100px;left:50%;transform:translateX(-50%);z-index:15;padding:7px 18px;border-radius:18px;background:rgba(0,0,0,.65);backdrop-filter:blur(8px);font-size:12px;color:#94a3b8;white-space:nowrap;display:none;border:1px solid rgba(255,255,255,.05)}
+  .toast.v{display:block}
+
+  .log-modal{position:absolute;top:0;left:0;right:0;bottom:0;z-index:30;background:rgba(0,0,0,.92);display:none;flex-direction:column;padding:16px}
+  .log-modal.v{display:flex}
+  .log-modal pre{flex:1;overflow:auto;font-size:11px;color:#94a3b8;line-height:1.6;white-space:pre-wrap;word-break:break-all;margin:8px 0;background:rgba(0,0,0,.3);border-radius:8px;padding:12px}
+  .log-modal .btn{width:100%}
+
+  .version-info{position:absolute;bottom:8px;right:12px;z-index:3;color:rgba(148,163,184,.25);font-size:10px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div class="overlay" id="ov">
+  <div class="spinner" id="sp"></div>
+  <div class="s" id="st">Initializing...</div>
+  <div class="d" id="sd">Loading</div>
+  <div class="e" id="se"></div>
+</div>
+
+<div class="guide" id="guide">
+  <div class="gf">
+    <div class="c tl"></div><div class="c tr"></div>
+    <div class="c bl"></div><div class="c br"></div>
+    <div class="gl">Move phone to scan surfaces</div>
+  </div>
+</div>
+
+<div class="hud" id="hud">
+  <div class="badge" id="tb">&#x1F4E1; Initializing...</div>
+  <div class="badge" id="fb">0 FPS</div>
+  <div class="badge" id="eb" style="display:none;cursor:pointer">&#x1F4CB; Log</div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div class="bar" id="bar">
+  <button class="btn" id="bp">&#x1F4E6; Place</button>
+  <button class="btn" id="br">&#x21BA; Reset</button>
+</div>
+
+<div class="version-info">8th Wall SLAM Test v1</div>
+
+<div class="log-modal" id="logModal">
+  <h3 style="color:#e2e8f0;font-size:14px;margin-bottom:4px">Engine Log</h3>
+  <pre id="logContent">No entries</pre>
+  <button class="btn" id="logClose">Close</button>
+</div>
+
+<script>
+// ── Config ──
+const CFG = {
+  ewUrl: new URLSearchParams(location.search).get('ew') || '/8thwall/xr.js',
+  modelUrl: '/models/nefertiti-head.glb',
+  timeout: 20000,
+}
+
+// ── State ──
+let THREE, scene, camera, renderer, model, clock
+let isTracking = false, modelLoaded = false, frameCount = 0, lastFps = 0
+let engineMode = 'none' // '8thwall' | 'fallback'
+
+// ── UI Refs ──
+const $ = id => document.getElementById(id)
+const ov = $('ov'), st = $('st'), sd = $('sd'), se = $('se'), sp = $('sp')
+const hud = $('hud'), tb = $('tb'), fb = $('fb'), eb = $('eb')
+const guide = $('guide'), bar = $('bar'), toast = $('toast')
+const logModal = $('logModal'), logContent = $('logContent')
+
+const logEntries = []
+function log(msg) {
+  const t = new Date().toISOString().slice(11, 23)
+  logEntries.push(`[${t}] ${msg}`)
+  logContent.textContent = logEntries.join('\n')
+  console.log(`[Test] ${msg}`)
+}
+
+function status(text, detail, error) {
+  st.textContent = text; sd.textContent = detail || ''; se.textContent = error || ''
+  log(`${text}${detail ? ' — ' + detail : ''}${error ? ' ERROR: ' + error : ''}`)
+}
+
+function showToast(msg, dur = 2000) {
+  toast.textContent = msg; toast.classList.add('v')
+  clearTimeout(toast._t); toast._t = setTimeout(() => toast.classList.remove('v'), dur)
+}
+
+function ready() {
+  ov.classList.add('hidden')
+  hud.classList.add('v')
+  bar.classList.add('v')
+  guide.classList.add('v')
+  showToast('Scan the environment to detect surfaces')
+}
+
+function setTracking(on) {
+  isTracking = on
+  tb.textContent = on ? '\u{1F4E1} Tracking' : '\u{1F4E1} Searching...'
+  tb.className = `badge ${on ? 'on' : 'off'}`
+  if (on) { guide.classList.remove('v'); showToast('Surface detected! Tap Place to add model') }
+  else { guide.classList.add('v') }
+}
+
+// ── Script Loader ──
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const s = document.createElement('script')
+    s.src = src; if (src.includes('xr.js')) s.setAttribute('data-preload-chunks', 'slam'); s.crossOrigin = 'anonymous'
+    s.onload = res; s.onerror = () => rej(new Error(`Failed to load: ${src.slice(0,80)}`))
+    document.head.appendChild(s)
+  })
+}
+
+// ── Init Three.js ──
+async function initThree() {
+  status('Loading Three.js...')
+  await loadScript('https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js')
+  window.THREE = window.THREE || THREE
+  THREE = window.THREE
+  log('Three.js loaded')
+  // GLTFLoader
+  await loadScript('https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js')
+  log('GLTFLoader loaded')
+}
+
+// ── Fallback scene (plain Three.js) ──
+function setupFallback() {
+  const canvas = $('c')
+  scene = new THREE.Scene()
+  camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 1000)
+  camera.position.set(0, 0.5, 1.5)
+  renderer = new THREE.WebGLRenderer({canvas, antialias: true, alpha: true})
+  renderer.setSize(innerWidth, innerHeight)
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
+  renderer.shadowMap.enabled = true
+
+  // Lights
+  scene.add(new THREE.AmbientLight(0xffffff, 1.2))
+  const dl = new THREE.DirectionalLight(0xffffff, 2); dl.position.set(2,5,3); scene.add(dl)
+  const fl = new THREE.DirectionalLight(0xffffff, 0.6); fl.position.set(-2,1,-2); scene.add(fl)
+
+  // Ground grid
+  const grid = new THREE.GridHelper(3, 20, 0x818cf8, 0x4f46e5)
+  grid.position.y = -0.3; scene.add(grid)
+
+  // Resize
+  addEventListener('resize', () => {
+    camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix()
+    renderer.setSize(innerWidth, innerHeight)
+  })
+
+  loadModel()
+}
+
+// ── Load GLB model ──
+function loadModel() {
+  status('Downloading model...', CFG.modelUrl)
+  const loader = new THREE.GLTFLoader()
+  loader.load(CFG.modelUrl,
+    gltf => {
+      model = gltf.scene
+      // Auto-center & scale
+      const box = new THREE.Box3().setFromObject(model)
+      const size = box.getSize(new THREE.Vector3())
+      const s = 0.3 / Math.max(size.x, size.y, size.z)
+      model.scale.set(s, s, s)
+      const c = box.getCenter(new THREE.Vector3())
+      model.position.sub(c.multiplyScalar(s))
+      model.traverse(ch => { if(ch.isMesh){ch.castShadow=true;ch.receiveShadow=true} })
+      model.visible = false
+      scene.add(model)
+      modelLoaded = true
+      log(`Model loaded (${(gltf.parser?._urls?.length || 0)} parts)`)
+
+      if (engineMode === 'fallback') { ready(); setTracking(false) }
+    },
+    xhr => {
+      if(xhr.total > 0) status(`Downloading ${Math.round(xhr.loaded/xhr.total*100)}%`)
+    },
+    err => {
+      log(`Model load error: ${err.message}`)
+      // Fallback cube
+      const g = new THREE.BoxGeometry(0.15, 0.15, 0.15)
+      const m = new THREE.MeshStandardMaterial({color:0x818cf8, metalness:0.3, roughness:0.4})
+      model = new THREE.Mesh(g,m); model.visible = false; scene.add(model); modelLoaded = true
+      status('Model unavailable', 'Using fallback cube')
+      if (engineMode === 'fallback') { ready(); setTracking(false) }
+    }
+  )
+}
+
+// ── Fallback render loop ──
+function startFallbackLoop() {
+  clock = new THREE.Clock()
+  function anim() {
+    requestAnimationFrame(anim)
+    const dt = clock.getDelta()
+    if (model && model.visible) model.rotation.y += dt * 0.8
+    // FPS
+    frameCount++
+    const now = performance.now()
+    if (now - lastFps >= 1000) { fb.textContent = `${frameCount} FPS`; frameCount=0; lastFps=now }
+    renderer.render(scene, camera)
+  }
+  anim()
+}
+
+// ── 8th Wall Path ──
+async function start8thWall() {
+  engineMode = '8thwall'
+  const XR8 = window.XR8
+
+  // Pipeline modules
+  XR8.addCameraPipelineModule(XR8.XrController.pipelineModule())
+  XR8.addCameraPipelineModule(XR8.GlTextureRenderer.pipelineModule())
+  XR8.addCameraPipelineModule(XR8.Threejs.pipelineModule())
+
+  // App module
+  XR8.addCameraPipelineModule({
+    name: 'test-app',
+    onStart: () => {
+      const xs = XR8.Threejs.xrScene()
+      scene = xs.scene; camera = xs.camera; renderer = xs.renderer
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
+      // Lights
+      scene.add(new THREE.AmbientLight(0xffffff, 1.2))
+      const dl = new THREE.DirectionalLight(0xffffff, 2); dl.position.set(2,5,3); scene.add(dl)
+      const fl = new THREE.DirectionalLight(0xffffff, 0.6); fl.position.set(-2,1,-2); scene.add(fl)
+      log('8th Wall scene ready')
+    },
+    onUpdate: () => {
+      // Resize
+      if (renderer) {
+        const w=innerWidth, h=innerHeight
+        const sz = renderer.getSize(new THREE.Vector2())
+        if(sz.x!==w||sz.y!==h) renderer.setSize(w,h)
+      }
+      // FPS
+      frameCount++
+      const now=performance.now()
+      if(now-lastFps>=1000){fb.textContent=`${frameCount} FPS`;frameCount=0;lastFps=now}
+
+      // Tracking detection via camera position
+      try {
+        const xs = XR8.Threejs.xrScene()
+        const p = xs.camera.position
+        const tracking = !(Math.abs(p.x)<0.001&&Math.abs(p.y)<0.001&&Math.abs(p.z)<0.001)
+        if (tracking !== isTracking) setTracking(tracking)
+      } catch(e) {}
+    },
+  })
+
+  status('Starting 8th Wall engine...', 'Requesting camera')
+  log('XR8.run()...')
+  await XR8.run({canvas: $('c'), allowedDevices: XR8.XrConfig.device().ANY})
+  log('XR8.run() success')
+  status('Engine running', 'Waiting for surface detection')
+  loadModel()
+}
+
+// ── Actions ──
+function placeModel() {
+  if (!modelLoaded) { showToast('Model not ready yet'); return }
+  if (!model) return
+  if (scene && camera) {
+    const dir = new THREE.Vector3(0, 0, -1.5).applyQuaternion(camera.quaternion)
+    model.position.copy(camera.position.clone().add(dir))
+    model.position.y = Math.max(model.position.y, 0)
+  } else {
+    model.position.set(0, 0, -1)
+  }
+  model.visible = true
+  showToast('✅ Model placed' + (isTracking ? ' (AR mode)' : ' (preview mode)'))
+}
+
+function resetModel() {
+  if (model) { model.visible = false; model.position.set(0,0,0) }
+  showToast('↺ Reset')
+}
+
+// ── Main ──
+async function main() {
+  // Bind actions
+  $('bp').addEventListener('click', placeModel)
+  $('br').addEventListener('click', resetModel)
+  document.addEventListener('click', e => {
+    if (e.target.tagName === 'BUTTON' || e.target.closest('.overlay')) return
+    if (model && !model.visible) placeModel()
+  })
+  // Log viewer
+  eb.addEventListener('click', () => logModal.classList.add('v'))
+  $('logClose').addEventListener('click', () => logModal.classList.remove('v'))
+
+  try {
+    // 1. Three.js
+    await initThree()
+
+    // 2. Try 8th Wall
+    status('Loading 8th Wall engine...', CFG.ewUrl)
+    try {
+      await loadScript(CFG.ewUrl)
+      // Wait for XR8 global
+      const t0 = Date.now()
+      while (!window.XR8) {
+        if (Date.now() - t0 > CFG.timeout) throw new Error('8th Wall load timeout')
+        await new Promise(r => setTimeout(r, 200))
+      }
+      log('8th Wall engine loaded')
+      await start8thWall()
+    } catch (ewErr) {
+      log(`8th Wall unavailable: ${ewErr.message}`)
+      // Fallback: Three.js preview
+      engineMode = 'fallback'
+      status('8th Wall unavailable', 'Running 3D preview mode (no AR tracking)', ewErr.message)
+      tb.textContent = '⚠️ 8th Wall unavailable'
+      tb.className = 'badge err'
+      setupFallback()
+      startFallbackLoop()
+    }
+  } catch (err) {
+    log(`Fatal: ${err.message}`)
+    status('Failed to initialize', err.message)
+    tb.textContent = '❌ Error'; tb.className = 'badge err'
+    sp.style.display = 'none'
+  }
+}
+
+document.readyState === 'loading'
+  ? document.addEventListener('DOMContentLoaded', main)
+  : main()
+</script>
+</body>
+</html>

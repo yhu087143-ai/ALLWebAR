@@ -1,0 +1,32 @@
+/* 错误边界兜底界面：把崩溃范围可视化，样式沿用编辑器同一套变量 */
+
+.crash {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 12px;
+  padding: 16px;
+  background: rgba(226, 75, 74, 0.08);
+  border: 1px solid rgba(226, 75, 74, 0.35);
+  border-radius: var(--radius-lg);
+}
+
+.crash-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ffb4b3;
+}
+
+.crash-msg {
+  max-width: 100%;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-1);
+  word-break: break-word;
+}
+
+.crash .btn {
+  margin-top: 4px;
+}

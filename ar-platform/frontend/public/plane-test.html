@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>平面放置 AR 测试 (8th Wall)</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: #000; overflow: hidden; touch-action: none; font-family: sans-serif; }
+    canvas { display: block; width: 100vw !important; height: 100vh !important; object-fit: cover !important; }
+    #status { position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 100;
+              background: rgba(0,0,0,0.75); color: #fff; padding: 6px 16px; border-radius: 8px;
+              font: 13px sans-serif; white-space: nowrap; pointer-events: none; }
+    #hint { position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%); z-index: 100;
+            background: rgba(0,0,0,0.5); color: rgba(255,255,255,0.9); padding: 10px 24px;
+            border-radius: 20px; font: 14px sans-serif; text-align: center; pointer-events: none;
+            backdrop-filter: blur(4px); border: 1px solid rgba(255,255,255,0.1);
+            transition: opacity 0.5s ease; }
+    #error { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 200;
+             color: #ff4444; font: 14px sans-serif; text-align: center; max-width: 85vw;
+             background: rgba(0,0,0,0.9); padding: 20px 24px; border-radius: 12px; display: none;
+             line-height: 1.5; }
+    #start-btn { position: fixed; bottom: 120px; left: 50%; transform: translateX(-50%); z-index: 150;
+                 background: #4f8cff; color: #fff; border: none; border-radius: 28px;
+                 padding: 14px 40px; font: 16px sans-serif; font-weight: 600;
+                 cursor: pointer; display: none; box-shadow: 0 4px 20px rgba(79,140,255,0.4); }
+  </style>
+</head>
+<body>
+  <div id="status">载入 8th Wall 引擎...</div>
+  <div id="hint"></div>
+  <div id="error"></div>
+  <button id="start-btn">启动 AR</button>
+
+  <script type="importmap">
+  { "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/"
+  }}
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+
+    // ════════════════════════════════════════════════════════════════
+    // 模块 1: SLAM Tracker — 封装 XR8 hitTest，提供原始命中结果
+    // ════════════════════════════════════════════════════════════════
+    class SLAMTracker {
+      constructor(xr8) { this._xr8 = xr8; }
+
+      /** 从屏幕中心发起 hitTest，返回原始结果数组 */
+      hitTest() {
+        try { return this._xr8.XrController.hitTest(0.5, 0.5) || []; }
+        catch (e) { return []; }
+      }
+
+      /** 获取当前相机位姿（用于放置后漂移校正） */
+      getCameraPose() {
+        try {
+          const scene = this._xr8.Threejs.xrScene();
+          if (scene && scene.camera) {
+            const pos = new THREE.Vector3();
+            const quat = new THREE.Quaternion();
+            scene.camera.getWorldPosition(pos);
+            scene.camera.getWorldQuaternion(quat);
+            return { position: pos, quaternion: quat };
+          }
+        } catch (e) { /* 忽略 */ }
+        return null;
+      }
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // 模块 2: SurfaceValidator — 验证命中结果可靠性
+    // 解决：非平面误识别（时序一致性 + 距离约束）
+    // ════════════════════════════════════════════════════════════════
+    class SurfaceValidator {
+      constructor(config = {}) {
+        this._history = [];
+        this._stableCount = 0;
+        this._historySize = config.historySize || 10;        // 缓存帧数
+        this._stableThreshold = config.stableThreshold || 6; // 需要稳定帧数
+        this._positionVariance = config.positionVariance || 0.02;   // 位置方差阈值(米)
+        this._minDistance = config.minDistance || 0.3;        // 最小有效距离(米)
+        this._maxDistance = config.maxDistance || 5.0;        // 最大有效距离(米)
+        this._surfaceConfirmed = false;
+        this._bestHit = null;
+      }
+
+      /** 输入原始 hit，输出验证后的结果（null = 不可靠） */
+      validate(hits) {
+        if (!hits || hits.length === 0) {
+          this._history = [];
+          this._stableCount = 0;
+          this._surfaceConfirmed = false;
+          this._bestHit = null;
+          return null;
+        }
+
+        // 选首个 FEATURE_POINT
+        const hit = hits.find(h => h.type === 'FEATURE_POINT') || hits[0];
+        if (!hit || !hit.position) return null;
+
+        // 距离约束
+        if (hit.distance < this._minDistance || hit.distance > this._maxDistance) {
+          this._history = [];
+          this._stableCount = 0;
+          this._surfaceConfirmed = false;
+          this._bestHit = null;
+          return null;
+        }
+
+        // 时序一致性：维护位置历史，计算方差
+        this._history.push({ x: hit.position.x, y: hit.position.y, z: hit.position.z });
+        if (this._history.length > this._historySize) this._history.shift();
+
+        if (this._history.length < this._historySize) {
+          // 历史不足，还未确认
+          this._surfaceConfirmed = false;
+          return null;
+        }
+
+        // 计算位置方差
+        const avg = this._history.reduce((a, p) => ({ x: a.x + p.x, y: a.y + p.y, z: a.z + p.z }), { x: 0, y: 0, z: 0 });
+        const n = this._history.length;
+        avg.x /= n; avg.y /= n; avg.z /= n;
+
+        const variance = this._history.reduce((a, p) => {
+          const dx = p.x - avg.x, dy = p.y - avg.y, dz = p.z - avg.z;
+          return a + dx * dx + dy * dy + dz * dz;
+        }, 0) / n;
+
+        if (variance > this._positionVariance) {
+          // 位置跳动太大，不可靠
+          this._stableCount = 0;
+          this._surfaceConfirmed = false;
+          this._bestHit = null;
+          return null;
+        }
+
+        this._stableCount++;
+        if (this._stableCount >= this._stableThreshold) {
+          this._surfaceConfirmed = true;
+          this._bestHit = hit;
+          return hit;
+        }
+
+        return null;
+      }
+
+      get isSurfaceConfirmed() { return this._surfaceConfirmed; }
+      get bestHit() { return this._bestHit; }
+      reset() {
+        this._history = [];
+        this._stableCount = 0;
+        this._surfaceConfirmed = false;
+        this._bestHit = null;
+      }
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // 模块 3: ReticleManager — 引导环的创建、显示、隐藏
+    // ════════════════════════════════════════════════════════════════
+    class ReticleManager {
+      constructor(scene) {
+        this._scene = scene;
+        this._group = this._createReticle();
+        this._scene.add(this._group);
+        this._group.visible = false;
+      }
+
+      _createReticle() {
+        const group = new THREE.Group();
+        const ringGeom = new THREE.RingGeometry(0.08, 0.14, 48);
+        const ringMat = new THREE.MeshBasicMaterial({
+          color: 0x4f8cff, side: THREE.DoubleSide, transparent: true, opacity: 0.85
+        });
+        const ring = new THREE.Mesh(ringGeom, ringMat);
+        ring.rotation.x = -Math.PI / 2;
+        group.add(ring);
+
+        const dotGeom = new THREE.CircleGeometry(0.018, 16);
+        const dotMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6 });
+        const dot = new THREE.Mesh(dotGeom, dotMat);
+        dot.rotation.x = -Math.PI / 2;
+        dot.position.z = 0.001;
+        group.add(dot);
+
+        return group;
+      }
+
+      /** 在 3D 位置显示 reticle */
+      showAt(position) {
+        this._group.position.copy(position);
+        this._group.visible = true;
+      }
+
+      hide() { this._group.visible = false; }
+      get visible() { return this._group.visible; }
+
+      dispose() {
+        this._scene.remove(this._group);
+        // 释放几何/材质
+        this._group.children.forEach(child => {
+          child.geometry?.dispose();
+          if (Array.isArray(child.material)) child.material.forEach(m => m.dispose());
+          else child.material?.dispose();
+        });
+      }
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // 模块 4: PlacementManager — 放置逻辑 + 放置后漂移校正
+    // 解决：放桌上后位置漂移（camera-anchor 持续校正）
+    // ════════════════════════════════════════════════════════════════
+    class PlacementManager {
+      constructor(scene, slamTracker) {
+        this._scene = scene;
+        this._slam = slamTracker;
+        this._placed = false;
+        this._object = null;
+        this._initialPos = new THREE.Vector3();
+
+        // 漂移校正参数
+        this._driftThreshold = 0.05;  // 5cm 漂移触发校正
+        this._lerpSpeed = 0.1;        // 校正平滑速率
+        this._lastResetTime = 0;
+        this._resetCooldown = 1000;   // 两次校正间最少间隔 1s
+      }
+
+      get hasPlaced() { return this._placed; }
+
+      /** 在指定位置放置物体 */
+      place(position) {
+        if (this._placed) return;
+        this._placed = true;
+
+        const cube = new THREE.Mesh(
+          new THREE.BoxGeometry(0.15, 0.15, 0.15),
+          new THREE.MeshStandardMaterial({ color: 0x4f8cff, metalness: 0.3, roughness: 0.4 })
+        );
+        cube.position.set(position.x, position.y + 0.075, position.z);
+        this._scene.add(cube);
+        this._object = cube;
+        this._initialPos.copy(position);
+        this._lastResetTime = performance.now();
+
+        console.log('[Placement] 已放置到:', position);
+      }
+
+      /**
+       * 每帧调用：检测漂移并校正
+       * 核心思路：
+       *   用当前 hitTest + camera pose 推算物体应该在的位置，
+       *   如果偏差超过阈值则 lerp 回正确位置。
+       */
+      update() {
+        if (!this._object) return;
+
+        // 通过 SLAM 获取当前相机位姿 + 屏幕中心 hitTest
+        const hits = this._slam.hitTest();
+        if (!hits || hits.length === 0) return;
+
+        const hit = hits.find(h => h.type === 'FEATURE_POINT') || hits[0];
+        if (!hit || !hit.position) return;
+
+        // hit.position 是当前相机视线与表面的交点
+        // 物体应该相对于该交点有固定的偏移（物体在交点上上方 7.5cm）
+        const expectedPos = new THREE.Vector3(
+          hit.position.x,
+          hit.position.y + 0.075,
+          hit.position.z
+        );
+
+        // 检查偏差
+        const dx = this._object.position.x - expectedPos.x;
+        const dy = this._object.position.y - expectedPos.y;
+        const dz = this._object.position.z - expectedPos.z;
+        const drift = Math.sqrt(dx * dx + dy * dy + dz * dz);
+
+        if (drift > this._driftThreshold) {
+          const now = performance.now();
+          if (now - this._lastResetTime > this._resetCooldown) {
+            // 用 lerp 平滑校正到期望位置
+            this._object.position.lerp(expectedPos, this._lerpSpeed);
+            this._lastResetTime = now;
+            console.log('[Placement] 漂移校正:', drift.toFixed(3) + 'm');
+          }
+        }
+      }
+
+      /** 替换物体（重新放置时调用） */
+      replace(position) {
+        this.remove();
+        this._placed = false;
+        this.place(position);
+      }
+
+      remove() {
+        if (this._object) {
+          this._scene.remove(this._object);
+          this._object.geometry?.dispose();
+          if (Array.isArray(this._object.material)) {
+            this._object.material.forEach(m => m.dispose());
+          } else {
+            this._object.material?.dispose();
+          }
+          this._object = null;
+        }
+        this._placed = false;
+      }
+
+      dispose() { this.remove(); }
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // 模块组合：Main — 把四个模块装进 XR8 管线
+    // ════════════════════════════════════════════════════════════════
+    const $ = id => document.getElementById(id);
+    const status = $('status'), hint = $('hint'), errorEl = $('error'), startBtn = $('start-btn');
+
+    function showError(msg) {
+      errorEl.style.display = 'block'; errorEl.textContent = msg;
+      status.textContent = '❌ ' + msg; status.style.color = '#ff4444';
+      console.error('[PlaneTest]', msg);
+    }
+
+    window.THREE = THREE;
+
+    function loadScript(url, attrs) {
+      return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = url; s.async = true;
+        if (attrs) for (const [k, v] of Object.entries(attrs)) s.setAttribute(k, v);
+        s.onload = () => { s.setAttribute('data-loaded', 'true'); resolve(); };
+        s.onerror = () => reject(new Error('脚本加载失败: ' + url));
+        document.head.appendChild(s);
+      });
+    }
+
+    function waitForGlobal(key, timeoutMs) {
+      return new Promise((resolve, reject) => {
+        const start = Date.now();
+        const poll = () => {
+          if (window[key] !== undefined) return resolve(window[key]);
+          if (Date.now() - start > timeoutMs) return reject(new Error('等待 ' + key + ' 超时'));
+          requestAnimationFrame(poll);
+        };
+        poll();
+      });
+    }
+
+    async function main() {
+      // 1. 加载引擎
+      status.textContent = '载入 8th Wall 引擎...';
+      try {
+        await loadScript('/8thwall/xr.js', { 'data-preload-chunks': 'slam' });
+      } catch (e) { showError('引擎加载失败: ' + e.message); return; }
+
+      let XR8;
+      try {
+        XR8 = await waitForGlobal('XR8', 30000);
+      } catch (e) { showError('XR8 初始化超时'); return; }
+      status.textContent = '8th Wall 已加载';
+
+      // 2. 创建 canvas
+      const canvas = document.createElement('canvas');
+      canvas.style.display = 'block';
+      document.body.insertBefore(canvas, document.body.firstChild);
+
+      // 3. 管线模块
+      XR8.addCameraPipelineModule(XR8.XrController.pipelineModule());
+      XR8.addCameraPipelineModule(XR8.GlTextureRenderer.pipelineModule());
+      XR8.addCameraPipelineModule(XR8.Threejs.pipelineModule({
+        renderer: { alpha: true, antialias: true }
+      }));
+
+      // 4. 创建四个子模块（先不启动，等 onStart 拿到 Three.js 场景）
+      let slam, validator, reticle, placement;
+
+      const appModule = {
+        name: 'plane-test-app',
+
+        onStart: () => {
+          try {
+            const xrScene = XR8.Threejs.xrScene();
+            const scene = xrScene.scene;
+            const renderer = xrScene.renderer;
+
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            scene.background = null;
+
+            // 灯光
+            scene.add(new THREE.AmbientLight(0xffffff, 1.5));
+            const dirLight = new THREE.DirectionalLight(0xffffff, 2);
+            dirLight.position.set(0, 3, 3);
+            scene.add(dirLight);
+
+            // 启用平面检测
+            try { XR8.XrController.configure({ surfaceEstimation: true }); } catch (e) {
+              console.warn('surfaceEstimation 配置失败:', e);
+            }
+
+            // ═══ 实例化四个模块 ═══
+            slam = new SLAMTracker(XR8);
+            validator = new SurfaceValidator();
+            reticle = new ReticleManager(scene);
+            placement = new PlacementManager(scene, slam);
+
+            console.log('[PlaneTest] 模块已初始化');
+          } catch (e) {
+            console.error('[PlaneTest] onStart 错误:', e);
+            showError('初始化 3D 场景失败: ' + e.message);
+          }
+        },
+
+        // ─── 每帧循环 ───
+        onUpdate: () => {
+          if (!slam || !validator || !reticle) return;
+
+          if (placement.hasPlaced) {
+            // 已放置 → 运行漂移校正
+            placement.update();
+            return;
+          }
+
+          // 未放置 → 运行 hitTest + 表面验证
+          const hits = slam.hitTest();
+          const validHit = validator.validate(hits);
+
+          if (validHit) {
+            reticle.showAt(new THREE.Vector3(
+              validHit.position.x, validHit.position.y, validHit.position.z
+            ));
+            status.textContent = '已检测到平面 ✅';
+            hint.textContent = '点击屏幕放置物体';
+          } else {
+            reticle.hide();
+            if (!validator.isSurfaceConfirmed) {
+              status.textContent = validator._history.length < 10
+                ? '扫描平面中... (' + (validator._history.length) + '/' + validator._historySize + ')'
+                : '平面不稳定，请缓慢移动手机';
+            } else {
+              status.textContent = '扫描平面中...';
+            }
+            hint.textContent = '🔍 缓慢移动手机，将蓝色圆环对准桌面或地面';
+          }
+        },
+
+        onAttach: () => {
+          console.log('[PlaneTest] 摄像头已就绪');
+          status.textContent = 'AR 已启动，扫描平面...';
+          hint.textContent = '🔍 缓慢移动手机，寻找平面';
+
+          const onTap = () => {
+            if (placement?.hasPlaced) return;
+            if (!validator?.bestHit) {
+              hint.textContent = '⚠️ 未检测到稳定平面';
+              return;
+            }
+
+            const hit = validator.bestHit;
+            placement.place(new THREE.Vector3(hit.position.x, hit.position.y, hit.position.z));
+
+            reticle.hide();
+            hint.style.opacity = '0';
+            setTimeout(() => { hint.textContent = '✅ 已放置'; hint.style.opacity = '1'; }, 500);
+            status.textContent = '已放置 ✅';
+            status.style.color = '#4ade80';
+          };
+
+          document.addEventListener('click', onTap);
+          document.addEventListener('touchstart', (e) => {
+            if (e.changedTouches.length === 1) onTap();
+          }, { passive: true });
+        },
+
+        onCameraStatusChange: (args) => {
+          console.log('[PlaneTest] 相机状态:', args.status);
+          if (args.status === 'hasStream') {
+            status.textContent = '摄像头已启动，扫描平面...';
+          } else if (args.status === 'hasVideo') {
+            status.textContent = '摄像头视频已就绪';
+          } else if (args.status === 'failed') {
+            showError('摄像头启动失败，请检查权限');
+          }
+        },
+
+        onException: (err) => {
+          console.error('[PlaneTest] 管线异常:', err);
+        },
+      };
+
+      XR8.addCameraPipelineModule(appModule);
+
+      // 5. 启动按钮
+      status.textContent = '点击下方「启动 AR」开始';
+      startBtn.style.display = 'block';
+
+      startBtn.addEventListener('click', async () => {
+        startBtn.style.display = 'none';
+        status.textContent = '启动 AR 会话...';
+        try {
+          await XR8.run({ canvas, allowedDevices: XR8.XrConfig.device().ANY });
+          status.textContent = 'AR 运行中';
+        } catch (e) {
+          showError('AR 启动失败: ' + (e.message || e));
+        }
+      }, { once: true });
+    }
+
+    main().catch(err => { showError(err.message || String(err)); });
+  </script>
+</body>
+</html>

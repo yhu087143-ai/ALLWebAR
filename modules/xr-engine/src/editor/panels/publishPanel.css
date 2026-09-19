@@ -1,0 +1,374 @@
+/* 发布到 AR 平台 对话框 —— 复用 styles.css 里的 CSS 变量，保持与编辑器同一套暗色语言 */
+
+.pub-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(6, 6, 10, 0.66);
+  backdrop-filter: blur(3px);
+  animation: pub-fade 140ms ease-out;
+}
+
+.pub-dialog {
+  width: 100%;
+  max-width: 520px;
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.55);
+  animation: pub-rise 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes pub-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes pub-rise {
+  from { opacity: 0; transform: translateY(10px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+.pub-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.pub-head-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-0);
+}
+
+.pub-head-title svg {
+  color: var(--accent);
+}
+
+.pub-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--text-1);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: color 120ms, background 120ms, border-color 120ms;
+}
+
+.pub-close:hover:not(:disabled) {
+  color: var(--text-0);
+  background: var(--bg-3);
+  border-color: var(--border-strong);
+}
+
+.pub-close:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pub-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  overflow-y: auto;
+}
+
+/* 追踪方式：两张大卡片，选中态用 accent 描边 */
+.pub-modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.pub-mode {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 11px 12px;
+  color: var(--text-1);
+  text-align: left;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: border-color 130ms, background 130ms, color 130ms;
+}
+
+.pub-mode:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text-0);
+}
+
+.pub-mode.active {
+  color: var(--text-0);
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.pub-mode.active svg {
+  color: var(--accent);
+}
+
+.pub-mode:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.pub-mode-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.pub-mode-desc {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+/* 触发图选择区 */
+.pub-target {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.pub-target-preview {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 84px;
+  height: 84px;
+  overflow: hidden;
+  color: var(--text-2);
+  background: var(--bg-2);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+}
+
+.pub-target-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.pub-target-side {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.pub-target-name {
+  font-size: 11px;
+  color: var(--text-1);
+  word-break: break-all;
+}
+
+.pub-hint {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+/* 状态条 */
+.pub-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text-1);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.pub-spinner {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  border: 2px solid var(--accent-soft);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: pub-spin 700ms linear infinite;
+}
+
+@keyframes pub-spin {
+  to { transform: rotate(360deg); }
+}
+
+.pub-error,
+.pub-warn {
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.55;
+  border-radius: var(--radius);
+}
+
+.pub-error {
+  color: #ffb4b3;
+  background: rgba(226, 75, 74, 0.12);
+  border: 1px solid rgba(226, 75, 74, 0.35);
+}
+
+.pub-warn {
+  color: #f0c98a;
+  background: rgba(186, 117, 23, 0.12);
+  border: 1px solid rgba(186, 117, 23, 0.35);
+}
+
+.pub-warn code {
+  padding: 1px 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-0);
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 3px;
+}
+
+/* 成功态 */
+.pub-success {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.pub-success-icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: #b6e08a;
+  background: rgba(99, 153, 34, 0.18);
+  border: 1px solid rgba(99, 153, 34, 0.45);
+  border-radius: 50%;
+}
+
+.pub-success-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-0);
+}
+
+.pub-success-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.pub-qr {
+  display: flex;
+  justify-content: center;
+  padding: 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.pub-qr img {
+  display: block;
+  border-radius: 4px;
+}
+
+.pub-link-row {
+  display: flex;
+  gap: 8px;
+}
+
+.pub-link-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pub-link-row .btn {
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+/* AR 展示参数：一排紧凑的数字输入（X/Y/Z、缩放、动效参数共用） */
+.pub-num-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.pub-num {
+  flex: 1 1 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.pub-num > span {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.pub-num > span:first-child {
+  min-width: 2.2em;
+}
+
+.pub-num input,
+.pub-num select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.pub-num-row + .pub-num-row {
+  margin-top: 6px;
+}
+
+.pub-meta {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-2);
+  word-break: break-all;
+}
+
+/* 底部操作条 */
+.pub-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.pub-foot-note {
+  flex: 1 1 auto;
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.pub-foot .btn {
+  gap: 6px;
+}
