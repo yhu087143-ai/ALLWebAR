@@ -10,6 +10,21 @@
 
 import type { MotionConfig } from './animation/MotionController';
 
+
+/** AR 植物大战僵尸配置（PvzController） */
+export interface PvzConfig {
+  enabled?: boolean;
+  cols?: number;
+  rows?: number;
+  cellSize?: number;
+  waves?: number;
+  models?: {
+    plants?: Partial<Record<'sunflower' | 'peashooter' | 'wallnut' | 'cherry', string>>;
+    zombies?: Partial<Record<'normal' | 'cone' | 'bucket', string>>;
+    scale?: number;
+  };
+}
+
 export interface ARConfig {
   /** 3D 模型 .glb 文件的 URL */
   modelUrl: string;
@@ -45,6 +60,8 @@ export interface ARConfig {
   planeMode?: 'horizontal' | 'vertical' | 'any';
   /** 面部特征点索引（面部追踪模式下模型放置位置） */
   faceFeature?: number;
+  /** AR 植物大战僵尸（?pvz=1 开启） */
+  pvzConfig?: PvzConfig;
   /** 全景穹顶（AR 版 720°）：平面放置后由 toggleDome() 显形的沉浸穹顶 */
   domeConfig?: {
     /** 全景贴图（等距柱状 2:1）；缺省用内置程序化星穹 */

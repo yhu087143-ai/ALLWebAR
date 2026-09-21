@@ -17,6 +17,27 @@ function ensureEditable(eng) {
   if (eng.isFrozen) eng.isFrozen = false;
 }
 
+/**
+ * 收集场景里的贴图规格（去重），供 ?debug=1 面板显示。
+ * 手机端"识别成功但看不到"若出在显存，矩阵类指标全是正常的，
+ * 只有贴图规格能直接暴露问题，所以专门读它。
+ */
+function mdWalkScene(obj, seen, out) {
+  if (!obj) return;
+  const mats = obj.material ? (Array.isArray(obj.material) ? obj.material : [obj.material]) : [];
+  for (const m of mats) {
+    for (const k of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap']) {
+      const t = m[k];
+      if (t && !seen.has(t)) {
+        seen.add(t);
+        const im = t.image;
+        if (im && im.width) out.push(`${im.width}x${im.height}`);
+      }
+    }
+  }
+  for (const c of obj.children || []) mdWalkScene(c, seen, out);
+}
+
 export default function ViewPage() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -129,14 +150,45 @@ export default function ViewPage() {
         engine = new AREngine(containerRef.current, {
           modelUrl: data.modelUrl,
           tracking: data.trackingType,
-          engine: data.config?.engine || undefined,
+          // 追踪引擎：记录 config 优先，其次允许 ?engine=8thwall 这类 URL 参数覆盖
+          // （例如 PvZ 需要 8th Wall SLAM 的 6-DOF 世界锁定，而不是默认的陀螺仪伪 AR）
+          engine: data.config?.engine || new URLSearchParams(window.location.search).get('engine') || undefined,
           scale: data.config?.scale || 1,
-          position: data.config?.positionOffset
-            ? [data.config.positionOffset.x, data.config.positionOffset.y, data.config.positionOffset.z]
-            : [DEFAULT_POS.x, DEFAULT_POS.y, DEFAULT_POS.z],
+          /*
+           * 位置偏移：优先取作者在编辑器里保存的值。
+           *
+           * ⚠️ 这里踩过两个坑，都必须保留说明：
+           *
+           * 坑1（字段位置）：后端把 positionOffset 放在**顶层** `data.positionOffset`，
+           *   而 image 模式真正生效的是 `unifiedConfig.params.position`。
+           *   曾经只读 `data.config?.positionOffset` → 永远 undefined。
+           *
+           * 坑2（单位语义，这才是"桌面能看、手机看不到"的根因）：
+           *   markerless 平面放置把 position 放在 _placementGroup（尺度=1，单位=米）
+           *   → 0.15 就是 0.15 米，视觉正常。
+           *   而 image 路径的 wrapper 挂在 anchor.group 下（尺度 = 目标图像素宽，如 291）
+           *   → 同一个 0.15 变成 43.6 单位 ≈ 图片高的 15%，手机窄屏直接顶出画面。
+           *   所以 image 路径必须把"米"换算成 anchor 单位：米 × 图宽像素 / 假想图宽(0.3m)。
+           *   否则两条路径共用同一份 config 却差 291 倍。
+           *
+           * 作者明确设成 (0,0,0) 时必须尊重，不能再套默认值。
+           */
+          position: (() => {
+            const p = data.config?.positionOffset
+              ?? data.config?.position
+              ?? data.positionOffset
+              ?? data.unifiedConfig?.params?.position;
+            if (p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)) {
+              return [p.x, p.y, p.z];
+            }
+            return [DEFAULT_POS.x, DEFAULT_POS.y, DEFAULT_POS.z];
+          })(),
           targetUrl: data.targetUrl || data.config?.targetUrl || '/targets/default.mind',
-          filterMinCF: 0.005,
-          filterBeta: 30,
+          // One Euro 滤波：不传 = 用引擎/MindAR 默认 0.001/1000（社区验证的手持最优组合）。
+          // ⚠️ 之前硬编码 0.005/30：beta 比 默认小 33 倍 → 手机一动模型滞后好几秒，看起来"飘走"；
+          //    minCF 又偏大 → 静止时抖动。_record config 里的 0.0003/100 同样不适合 image 追踪，不采用。
+          filterMinCF: undefined,
+          filterBeta: undefined,
           missTolerance: 15,
           warmupTolerance: 5,
           freezeOnDetect: false,
@@ -150,6 +202,8 @@ export default function ViewPage() {
           maxTrack: data.config?.maxTrack || undefined,
           onActiveTargetChange: (idx) => setActiveTarget(idx),
           domeConfig: data.config?.domeConfig || undefined,
+          pvzConfig: data.config?.pvzConfig
+            ?? (new URLSearchParams(window.location.search).has('pvz') ? { enabled: true } : undefined),
         });
 
         engine.onTrackingStatus = (found) => {
@@ -157,6 +211,7 @@ export default function ViewPage() {
         };
 
         engine.onModelStatus = (status, pct) => {
+          if (window.__phoneDebug) window.__phoneDebug.modelStatus = status + (pct != null ? ` ${Math.round(pct * 100)}%` : '');
           if (!cancelled) onModelStatus(status, pct);
         };
 
@@ -167,6 +222,86 @@ export default function ViewPage() {
 
         await engine.start();
         console.log('[ViewPage] AR 引擎启动成功');
+
+        // 手机端 GPU 压力保护：
+        //   - pixelRatio 上限 2（DPR=3 的手机渲染缓冲是桌面 3 倍，重模型极易丢上下文）
+        //   - 上下文丢失监听：引擎内部也已绑定（engine.isContextLost 可读），
+        //     这里只把状态同步给 ?debug=1 面板，不重复 preventDefault。
+        // 贴图降规格由引擎 _applyMobileTextureBudget 按设备能力自动完成，
+        // 是本场景（3×2048² 贴图）真正的省显存手段，见其注释。
+        try {
+          const mr = engine.mindAR?.renderer;
+          if (mr) {
+            mr.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+            mr.domElement.addEventListener('webglcontextlost', (e) => {
+              e.preventDefault();
+              console.error('[ViewPage] WebGL 上下文丢失！模型消失的最直接原因');
+              if (window.__phoneDebug) window.__phoneDebug.ctxLost = true;
+            }, false);
+          }
+        } catch (e) { console.warn('[ViewPage] pixelRatio 调整失败:', e); }
+
+        // ?debug=1 手机诊断面板：现场显示识别/渲染/上下文状态
+        if (new URLSearchParams(window.location.search).has('debug')) {
+          const panel = document.createElement('div');
+          panel.style.cssText = 'position:fixed;top:6px;left:6px;z-index:9999;background:rgba(0,0,0,.72);color:#0f0;'
+            + 'font:10px/1.5 monospace;padding:6px 8px;border-radius:6px;pointer-events:none;white-space:pre;max-width:70vw;';
+          document.body.appendChild(panel);
+          window.__phoneDebug = { ctxLost: false };
+          const tick = setInterval(() => {
+            try {
+              const eg = engineRef.current;
+              if (!eg) { panel.textContent = 'engine: null'; return; }
+              const mr = eg.mindAR?.renderer;
+              const g = eg.anchor?.group;
+              const e = g ? g.matrixWorld.elements : null;
+              const mw = eg._modelWrapper;
+              // 贴图实际规格：确认移动端降规格是否生效（真问题常在显存而非矩阵）
+              let texInfo = '-';
+              try {
+                const seen = new Set(); const t = [];
+                mdWalkScene(eg.mindAR?.scene, seen, t);
+                texInfo = t.length ? `${t[0]}${t.length > 1 ? '+' + (t.length - 1) : ''}` : '0';
+              } catch { /* 面板容错，不影响 AR */ }
+              panel.textContent = [
+                `found:${eg._trackingFound} model:${window.__phoneDebug.modelStatus ?? '?'} ctxLost:${eg.isContextLost}`,
+                `dpr:${window.devicePixelRatio} video:${eg.mindAR?.video?.videoWidth}x${eg.mindAR?.video?.videoHeight}`,
+                `draws:${mr ? mr.info.render.calls : '-'} tris:${mr ? mr.info.render.triangles : '-'}`,
+                `tex:${texInfo} pr:${mr && mr.getPixelRatio ? mr.getPixelRatio() : '-'}`,
+                `anchor: ${e ? [e[12], e[13], e[14]].map((v) => v.toFixed(1)).join(',') : '-'}`,
+                `wrapScale:${mw ? mw.scale.x.toFixed(1) : '-'} vis:${mw ? mw.visible : '-'} kids:${g ? g.children.length : '-'}`,
+                // ── 位姿稳定性（「一闪而过」的判定依据）──
+                // lost: 连续丢帧计数，>15 会停止写矩阵；
+                // sr: 平滑器是否就绪，false 表示正处在重捕获首帧；
+                // ndc: 模型在屏幕上的归一化坐标，|x|>1 或 |y|>1 即已出画面；
+                // dist: 模型到相机距离，超出 [near,far] 会被裁掉。
+                (() => {
+                  try {
+                    if (!mw || !eg.mindAR?.camera) return 'pose: -';
+                    const wp = new mw.position.constructor();
+                    mw.getWorldPosition(wp);
+                    const cam = eg.mindAR.camera;
+                    const n = wp.clone().project(cam);
+                    const off = Math.abs(n.x) > 1 || Math.abs(n.y) > 1;
+                    // 深度符号诊断：MindAR anchor 空间里相机在原点，目标在 z 负方向。
+                    // smoothZ / trackZ 应同为负且数值接近；若 smoothZ 变正（跑到相机后方）
+                    // 或两者差距巨大，就是「纵深跳变」（模型不断靠近又弹回）。
+                    const spz = eg._smoothPos?.z, tpz = eg._trackPos?.z;
+                    const zBad = spz != null && tpz != null && (spz * tpz < 0 || Math.abs(spz - tpz) > 0.5);
+                    return `lost:${eg._lostFrameCount ?? '-'} sr:${eg._smoothReady ?? '-'} ` +
+                      `ndc:${n.x.toFixed(2)},${n.y.toFixed(2)}${off ? ' 出画!' : ''}\n` +
+                      `dist:${wp.distanceTo(cam.position).toFixed(1)} near:${cam.near} far:${cam.far}` +
+                      `${wp.distanceTo(cam.position) > cam.far ? ' 超远!' : ''}\n` +
+                      `smoothZ:${spz != null ? spz.toFixed(3) : '-'} trackZ:${tpz != null ? tpz.toFixed(3) : '-'}` +
+                      `${zBad ? ' 纵跳!' : ''} invD:${eg._invDepth != null ? eg._invDepth.toFixed(3) : '-'}\n` +
+                      `state:${eg._motionState ?? '-'} gyro:${eg._gyroAvailable ?? '-'}`;
+                  } catch { return 'pose: err'; }
+                })(),
+              ].join('\n');
+            } catch (err) { panel.textContent = 'debug err: ' + err.message; }
+          }, 500);
+          window.__phoneDebug._stop = () => clearInterval(tick);
+        }
 
         const unifiedConfig = data.unifiedConfig;
         if (unifiedConfig?.events?.length > 0) {
@@ -402,8 +537,19 @@ export default function ViewPage() {
   return (
     <div className="fixed inset-0 select-none">
       {/* AR 容器 — 全屏底层 */}
-      <div ref={containerRef} className="w-full h-full overflow-hidden" data-ar-view />
-      <style>{`[data-ar-view]{touch-action:none!important}[data-ar-view] video{width:100%!important;height:100%!important;object-fit:cover!important;top:0!important;left:0!important}.mindar-ui-overlay,.mindar-ui-crosshair,.mindar-ui-cursor,.mindar-ui-target{display:none!important}`}</style>
+      <div
+        ref={containerRef}
+        className="w-full h-full overflow-hidden"
+        style={{ isolation: 'isolate', position: 'relative' }}
+        data-ar-view
+      />
+      {/*
+        ⚠️ isolation:isolate 不能省：MindAR 把 video 设成 position:absolute; z-index:-2。
+        若不建立新的层叠上下文，video 会穿透到更外层被页面背景盖住 ——
+        表现为"追踪在跑、canvas 透明、但完全看不到摄像头画面"（overlay 也是因此才可见）。
+        overflow-hidden 只裁剪，不建立层叠上下文。
+      */}
+      <style>{`[data-ar-view]{touch-action:none!important;isolation:isolate!important;position:relative!important}[data-ar-view] video{width:100%!important;height:100%!important;object-fit:cover!important;top:0!important;left:0!important}.mindar-ui-overlay,.mindar-ui-crosshair,.mindar-ui-cursor,.mindar-ui-target{display:none!important}`}</style>
 
       {/* ===== 加载状态 ===== */}
       {loading && !error && (

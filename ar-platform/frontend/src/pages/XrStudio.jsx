@@ -18,8 +18,9 @@ import {
 /**
  * XR 创作台
  *
- * 把独立的 XR 引擎编辑器（modules/xr-engine，React 19 + R3F，与本站的 React 18 不兼容）
+ * 把独立的 XR 引擎编辑器（React 19 + R3F，与本站的 React 18 不兼容）
  * 以 iframe 方式挂在同源子路径下，让「搭场景 → 发布 → 扫码看 AR」在同一个网页里闭环。
+ * 引擎目录位置由部署方自行决定（开发时通过 vite proxy 指向它的 dev server）。
  *
  * 为什么用 iframe 而不是直接 import：
  *   XR 引擎是 React 19 + @react-three/fiber v9，本站前端是 React 18.3 且全仓零 R3F。
@@ -432,7 +433,7 @@ function OfflineCard({ useStatic, copied, onCopy, onRetry }) {
             onClick={onCopy}
             className="group mt-3 flex w-full items-center justify-between gap-3 rounded-lg border border-white/10 bg-black/40 px-3 py-2.5 text-left transition-colors hover:border-violet-400/30"
           >
-            <code className="font-mono text-[0.78rem] text-violet-200">cd modules/xr-engine && {START_COMMAND}</code>
+            <code className="font-mono text-[0.78rem] text-violet-200">&lt;引擎目录&gt; &amp;&amp; {START_COMMAND}</code>
             {copied ? (
               <Check size={14} strokeWidth={2} className="shrink-0 text-emerald-400" aria-hidden="true" />
             ) : (

@@ -215,6 +215,9 @@ export class EightWallAdapter implements IEngineAdapter {
   /** 覆盖 config 中的 placementMode，null=使用 config */
   private _placementOverride: 'horizontal' | 'vertical' | 'any' | null = null
 
+  /** PvZ 游戏模式：放置后不加载任何内容，由 AREngine 接管（见 ar-engine.ts onPlaced） */
+  private _pvzMode = false
+
   // External callbacks
   onTrackingStatus: ((found: boolean) => void) | null = null
   onModelStatus: ((status: 'loading' | 'loaded' | 'error', pct?: number) => void) | null = null
@@ -227,6 +230,8 @@ export class EightWallAdapter implements IEngineAdapter {
   get scene(): THREE.Scene { return this._scene }
   get camera(): THREE.PerspectiveCamera { return this._camera }
   get isRunning(): boolean { return this._isRunning }
+  /** 点击放置后创建的世界坐标放置组（PvZ 模式下游戏棋盘挂载点） */
+  get placedObject(): THREE.Group | null { return this._placedObject }
   /** SLAM 摄像头视频元素（用于重定位器快照捕获） */
   get videoElement(): HTMLVideoElement | null { return this._videoElement }
   /** 快照重定位器（SLAM 漂移修正） */
@@ -253,6 +258,13 @@ export class EightWallAdapter implements IEngineAdapter {
       this._position = config.model.position ?? [0, 0, 0]
     }
     this._videoUrl = config.videoUrl || ''
+
+    // PvZ 模式：清空模型/视频，放置后只建放置组，内容由 AREngine 的 PvzController 接管
+    this._pvzMode = config.eightWall?.pvzMode ?? false
+    if (this._pvzMode) {
+      this._modelUrl = ''
+      this._videoUrl = ''
+    }
 
     this._createCanvas()
 
@@ -978,7 +990,10 @@ export class EightWallAdapter implements IEngineAdapter {
           adapter._placedObject = placedGroup
 
           // 加载模型或视频
-          if (adapter._videoUrl) {
+          if (adapter._pvzMode) {
+            // PvZ：不加载任何内容（棋盘/僵尸由 AREngine 在 onPlaced 中创建）
+            adapter.onModelStatus?.('loaded')
+          } else if (adapter._videoUrl) {
             adapter._loadVideoInPlane(placedGroup)
           } else if (adapter._modelUrl) {
             adapter._loadModelInPlane(placedGroup)

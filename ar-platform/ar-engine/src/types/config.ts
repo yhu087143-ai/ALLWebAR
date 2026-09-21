@@ -590,6 +590,8 @@ export interface EightWallAppConfig {
   enableRecording?: boolean
   /** 启用快照重定位器（SLAM 漂移修正，默认开启） */
   snapshotRelocalizer?: boolean
+  /** PvZ 游戏模式：放置后不加载模型/占位方块，由 AREngine 在 onPlaced 中启动 PvzController */
+  pvzMode?: boolean
 }
 
 export interface TrackingTuning {

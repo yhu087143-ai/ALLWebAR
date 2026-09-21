@@ -10,6 +10,8 @@ import { config } from './config.js';
 
 let db = null;
 const dbPath = path.resolve(config.dbPath);
+/** 内存态是否有未落盘的变更 */
+let _dirty = false;
 
 /**
  * 初始化数据库
@@ -54,6 +56,8 @@ export async function initDB() {
   try { db.run('ALTER TABLE ar_experiences ADD COLUMN interaction_config TEXT'); } catch (_) {}
   try { db.run('ALTER TABLE ar_experiences ADD COLUMN unified_config TEXT'); } catch (_) {}
 
+  // 建表/迁移可能改变了结构（新库尤其需要落盘），标记为脏再保存
+  _dirty = true;
   saveDB();
   return db;
 }
@@ -68,12 +72,38 @@ export function getDB() {
 
 /**
  * 将数据库写入磁盘持久化
+ *
+ * ⚠️ 必须原子写：直接 `fs.writeFileSync(dbPath, buffer)` 会**原地覆盖**，
+ * 任何一次写入中断（进程被杀 / 并发写 / 磁盘繁忙）都会让数据库文件被截断，
+ * 而 initDB 里的 `CREATE TABLE IF NOT EXISTS` + `ALTER TABLE` 容错设计会让
+ * 损坏的库"成功"打开 —— 只是表里没数据，表现为接口 404「体验不存在」。
+ *
+ * 做法：先写同目录临时文件，再 rename 覆盖。同一文件系统内的 rename 是原子的，
+ * 要么看到旧文件、要么看到新文件，不会出现半截状态。
+ *
+ * 另：无变更时跳过写盘（GET 请求会触发 incrementViewCount → saveDB，
+ * 高频访问时全量导出+写盘是纯浪费，也放大了损坏窗口）。
  */
 function saveDB() {
   if (!db) return;
+  if (!_dirty) return;
   const data = db.export();
   const buffer = Buffer.from(data);
-  fs.writeFileSync(dbPath, buffer);
+  const tmpPath = `${dbPath}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmpPath, buffer);
+    fs.renameSync(tmpPath, dbPath);
+    _dirty = false;
+  } catch (e) {
+    // 写盘失败不能把进程带崩，也不能留下临时文件
+    try { fs.unlinkSync(tmpPath); } catch (_) {}
+    console.error('[db] 持久化失败:', e?.message);
+  }
+}
+
+/** 标记内存态已变更，下次 saveDB 才真正落盘 */
+function markDirty() {
+  _dirty = true;
 }
 
 /**
@@ -104,6 +134,7 @@ export function createAR(data) {
      data.interactionConfig ? JSON.stringify(data.interactionConfig) : null,
      data.unifiedConfig ? JSON.stringify(data.unifiedConfig) : null]
   );
+  markDirty();
   saveDB();
   return getAR(data.id);
 }
@@ -135,6 +166,7 @@ export function getAR(id) {
 export function incrementViewCount(id) {
   const d = getDB();
   d.run('UPDATE ar_experiences SET view_count = view_count + 1 WHERE id = ?', [id]);
+  markDirty();
   saveDB();
   return getAR(id);
 }
@@ -159,6 +191,7 @@ export function listAR() {
 export function deleteAR(id) {
   const d = getDB();
   d.run('DELETE FROM ar_experiences WHERE id = ?', [id]);
+  markDirty();
   saveDB();
 }
 

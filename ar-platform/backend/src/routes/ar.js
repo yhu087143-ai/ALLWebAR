@@ -160,11 +160,12 @@ router.get('/:id', async (req, res, next) => {
       return res.status(404).json({ error: 'AR 体验不存在' });
     }
 
-    // 递增访问计数（可能因并发删除而获取不到记录）
-    const updated = incrementViewCount(id);
-    if (!updated) {
-      return res.status(404).json({ error: 'AR 体验不存在' });
-    }
+    // 递增访问计数。
+    // ⚠️ 不能因为计数更新失败就回 404：记录明明存在，只因并发删除/写盘抖动
+    //    就把「体验不存在」返回给用户，会让本来能正常打开的页面直接白屏。
+    //    计数是辅助信息，失败只记日志，不影响主流程。
+    incrementViewCount(id);
+    const updated = record;
 
     res.json({
       id: updated.id,

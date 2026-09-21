@@ -19,6 +19,7 @@ import { AnimationController } from './animation/AnimationController';
 import { MotionController } from './animation/MotionController';
 import { FaceModelGenerator } from './capabilities/face-effects/FaceModelGenerator';
 import { SpatialAudioManager } from './audio/SpatialAudio';
+import { PvzController } from './game/pvz/PvzController';
 import type { FaceModelType } from './capabilities/face-effects/FaceModelGenerator';
 import { EightWallAdapter } from './adapters/EightWallAdapter';
 import { CameraARAdapter } from './adapters/CameraARAdapter';
@@ -103,6 +104,12 @@ export class AREngine {
   private _activeCamera: any = null;
   private _onTrackingStatus: ((found: boolean) => void) | null = null;
   private _onModelStatus: ((status: 'loading' | 'loaded' | 'error', pct?: number) => void) | null = null;
+  /**
+   * WebGL 上下文丢失标志。
+   * 丢失时 GPU 侧内容全没但 JS/追踪照跑 —— 现场表现为"识别成功但看不到"。
+   * 单独记一个字段，方便诊断面板与上层 UI 区分「没识别到」和「识别到但画不出来」。
+   */
+  private _contextLost = false;
   private _onFeatureQuality: ((quality: { features: number; confidence: number; quality: 'good' | 'fair' | 'poor' }) => void) | null = null;
   /** 平滑锚点位姿的上一帧值 */
   private _smoothPos = new THREE.Vector3();
@@ -124,7 +131,64 @@ export class AREngine {
   private _frozenQuat = new THREE.Quaternion();
   private _frozenScl = new THREE.Vector3(1, 1, 1);
   /** 非冻结模式下首次捕获的缩放值（防止追踪噪声导致大小抖动） */
+  /**
+   * MindAR anchor 空间尺度 = 目标图宽（.mind 里的像素宽，如 291）。
+   * MindAR 每帧写 group.matrix = worldMatrix × postMatrix，其中 postMatrix
+   * 携带该尺度 + 原点偏移 (w/2, h/2)。本引擎的 _updateAnchorPose 每帧覆写
+   * group.matrix，因此必须把同一尺度补回来，否则模型被缩小数百倍并被
+   * postMatrix 的原点偏移甩到图外 —— 表现为"识别成功但看不到/飘走"。
+   * 非 MindAR 路径保持 (1,1,1)。
+   */
   private _capturedScl = new THREE.Vector3(1, 1, 1);
+  /** 是否已从 postMatrix 捕获 anchor 尺度（每次 start 重置） */
+  private _anchorScaleCaptured = false;
+  /** _capturedScl 的倒数，用于把 group.matrix 里的坐标还原回 MindAR 原生空间 */
+  private _invCapturedScl = new THREE.Vector3(1, 1, 1);
+  /** 目标图原点在 anchor 空间的偏移 (w/2, h/2 - w/2, 0)，与 postMatrix 一致 */
+  private _anchorOrigin = new THREE.Vector3(0, 0, 0);
+  /**
+   * 「1 米 = 多少 anchor 像素单位」，由 _captureAnchorScale 算出（= 图宽 / 0.3）。
+   * wrapper.position 的单位是 anchor 像素单位，而作者在编辑器里填的是米，
+   * 因此 image 路径写入前必须乘这个系数，否则偏移被放大 w 倍（手机直接出屏）。
+   * 非 image 路径恒为 1。
+   */
+  private _unitsPerMeter = 1;
+
+  /**
+   * ⚠️⚠️ image 追踪下 z 是**负数**（目标在相机前方），绝不能当"深度正数"用。
+   *
+   * MindAR 的 anchor 空间里相机恒在原点，目标位于 z 的负方向：
+   * 实测本场景 `_trackPos.z ≈ −1.509`（归一化空间），乘以 `_capturedScl`(291)
+   * 后写出为 −439。相机朝 −z 看，所以负 z = 在镜头前方 = 正确。
+   *
+   * 但下面三处都假设 `z > 0`：
+   *   · `_invDepth = 1 / Math.max(z, 0.1)`   → −1.509 被抬到 0.1 → invDepth 恒 10
+   *   · `_smoothPos.z = 1 / _invDepth`        → 写出 +0.1（**正数，跑到相机后方**）
+   *   · `distSlow/Fast = 0.5 / Math.max(z, 0.1)` → 恒为 1，距离感知完全失效
+   *
+   * 后果：STATIONARY 分支直接 copy `_lockedPos`（z = −1.509，正常），
+   * 一旦切到 SLOW/FAST，z 立刻跳到 +0.1 —— 相差 1.6 个归一化单位 = 466 世界单位。
+   * 真机表现就是**模型在平面上平移正常、但纵深反复跳变**（用户描述的"不断刷新"）。
+   *
+   * 修法：逆深度滤波严格作用在"深度幅度"上（取 |z|），写出时再补回符号。
+   * 这样既保住逆深度对近处抖动的抑制，又不破坏 MindAR 的符号约定。
+   */
+  private _depthMagnitude(z: number): number {
+    // 下限 0.1 与原来一致，只是作用在幅度上而非带符号值
+    return Math.max(Math.abs(z), AREngine._MIN_DEPTH);
+  }
+
+  /** z 的符号（MindAR image/markerless 恒为 −1；万一上游给了正 z 也不写错） */
+  private _depthSign(z: number): number {
+    return z < 0 ? -1 : 1;
+  }
+
+  /**
+   * 约定：打印出来的目标图实际宽 0.3m。
+   * 这是编辑器预览（ArPreview3D 用 0.3m 宽卡片）与 AR 侧唯一的共同基准，
+   * 改这里必须同时改预览，否则"预览多大 AR 就多大"的承诺失效。
+   */
+  private static readonly _ASSUMED_TARGET_WIDTH_M = 0.3;
   /** 位姿死区阈值 — 极小噪声被忽略，同时保留跟踪目标的移动响应 */
   private _deadZonePos = 0.003;
   private _deadZoneRot = 0.005;
@@ -182,6 +246,12 @@ export class AREngine {
   private _hasEverTracked = false;
   /** 三状态平滑 — 参数配置 */
   private static readonly _STATIONARY_LOCK_FRAMES = 5;
+  /**
+   * 静止态的锁定值收敛系数（每帧）。
+   * 0.02 ≈ 50 帧（约 0.8s）收敛到 ~63%，既消除抖动又不会锁死首帧误差。
+   * 见 `_updateAnchorPose` 中 STATIONARY 分支的说明。
+   */
+  private static readonly _STATIONARY_CONVERGE = 0.02;
   private static readonly _DAMPING_SLOW = 5;
   private static readonly _DAMPING_FAST = 40;
   private static readonly _DEADZONE_POS = 0.01;
@@ -194,6 +264,13 @@ export class AREngine {
   private static readonly _DAMPING_Z_FAST = 0.5;
   /** FALLBACK 模式下 Z 轴死区（米，比 X/Y 大） */
   private static readonly _DEADZONE_Z = 0.02;
+  /**
+   * 深度幅度下限（与 z 同单位，归一化空间）。
+   * 逆深度滤波用 1/depth，depth→0 会发散，所以必须有底。
+   * ⚠️ 原实现把它写成 `Math.max(z, 0.1)`，等于假设 z>0；但 image 追踪的 z 是负数，
+   *    结果整个逆深度链路被这一个 clamp 废掉（详见 _depthMagnitude 注释）。
+   */
+  private static readonly _MIN_DEPTH = 0.1;
   /** 自适应阈值 — EMA 平滑因子（用于 gyroDelta 运行均值/方差） */
   private static readonly _GYRO_EMA_ALPHA = 0.05;
   /** 自适应阈值 — 静止门限倍数 (mean + n * std) */
@@ -277,6 +354,7 @@ export class AREngine {
   private _smoothStillFrames = 0;
   /** 放置内容独立组（scene 层级，解决 gyroGroup 反旋转导致的偏移物体摆动） */
   private _placementGroup: THREE.Group | null = null;
+  private _pvz: PvzController | null = null;
   /** 四元数运算预分配临时变量（减少 GC） */
   private _deltaQTmp = new THREE.Quaternion();
   private _smoothGyroTmp = new THREE.Quaternion();
@@ -326,13 +404,41 @@ export class AREngine {
 
   /**
    * 设置追踪状态回调
+   *
+   * ⚠️ 这里**绝不能直接覆写** `anchor.onTargetFound`。
+   *
+   * 曾经写成 `this.anchor.onTargetFound = () => cb(true)`，而 ViewPage 是在
+   * `engine.start()` **之后**才赋这个 setter 的 —— 于是启动时在 image 分支里
+   * 挂好的真正处理器（负责 `_isReacquisition = _hasEverTracked`、`_smoothReady = false`）
+   * 被整个替换掉。后果：追踪丢失后重新识别时，重捕获标志与平滑器都没有被重置，
+   * 引擎拿"丢失前的旧位姿"继续平滑，模型反复向目标靠近又弹回，形成刷新循环。
+   *
+   * 正确做法：把外部回调和内部处理合并，内部逻辑优先，外部回调只做通知。
    */
   set onTrackingStatus(cb: ((found: boolean) => void) | null) {
     this._onTrackingStatus = cb;
-    // 如果已经在运行，立即挂载回调到 anchor
-    if (this.anchor) {
-      this.anchor.onTargetFound = () => this._onTrackingStatus?.(true);
-      this.anchor.onTargetLost = () => this._onTrackingStatus?.(false);
+
+    // ⚠️⚠️ 这里**绝不能重新赋值** `anchor.onTargetFound/onTargetLost`。
+    //
+    // 曾经的写法是「本 setter 里再赋一次 anchor 回调」——无论是直接 `= () => cb(true)`
+    // 还是「重建一份内部逻辑 + cb」，都是**整体替换**：ViewPage 在 `engine.start()`
+    // 之后调这个 setter，于是 image 分支启动时挂上的真正处理器（含
+    // `_isReacquisition` / `_smoothReady` 重置、`_frozen` 复位、多目标 rec 记录、
+    // 视频路径的 tryPlay/player.pause）被一并抹掉。
+    // 后果：丢帧重捕获时平滑器不重置，引擎拿"丢失前的旧位姿"继续平滑，
+    // 模型反复靠近又弹回，形成用户看到的"不断刷新回原点"循环。
+    //
+    // 正确做法：anchor 回调由 start() 内部的**唯一写入方**建立（image / face / video
+    // 三条路径各自负责自己的副作用），外部只通过 `_onTrackingStatus` 收通知。
+    // 这里仅在回调尚未安装时（例如 start() 之前就赋了 setter）补一个最小兜底，
+    // 且必须走**链式追加**，绝不覆盖已有处理器。
+    if (this.anchor && !this.anchor.onTargetFound) {
+      this.anchor.onTargetFound = () => {
+        this._onTrackingStatus?.(true);
+      };
+      this.anchor.onTargetLost = () => {
+        this._onTrackingStatus?.(false);
+      };
     }
   }
 
@@ -412,6 +518,12 @@ export class AREngine {
 
       // 4. 限制 pixel ratio 防止高 DPI 手机性能问题
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+      // 4b. WebGL 上下文存活监控
+      //     手机显存吃紧时驱动会静默丢弃上下文 → 画面全黑但 JS/追踪仍在跑，
+      //     现场看起来就是"识别成功但什么都看不到"。不主动监听就完全无声，
+      //     这里至少把它暴露到日志与 onError，避免继续被当成"位置/尺度问题"排查。
+      this._bindContextLossWatcher(renderer);
 
       // 5. 灯光
       const ambient = new THREE.AmbientLight(0xffffff, 1.5);
@@ -528,6 +640,11 @@ export class AREngine {
       console.log("[AREngine] 调用 mindAR.start()...");
       await this.mindAR.start();
       console.log("[AREngine] mindAR.start() 成功");
+
+      // ⚠️ 必须在渲染循环启动前捕获 anchor 尺度：postMatrixs 由 mindAR.start() 内
+      // 的 addImageTargets 填充，而 _updateAnchorPose 每帧都会用 _capturedScl 覆写
+      // group.matrix。晚一步捕获 → 首帧就是错的尺寸/位置。
+      this._captureAnchorScale();
     } catch (initErr) {
       console.error("[AREngine] start() 初始化失败:", initErr);
       console.error("[AREngine] 错误详情:", initErr instanceof Error ? `${initErr.name}: ${initErr.message}\n${initErr.stack}` : JSON.stringify(initErr));
@@ -544,26 +661,28 @@ export class AREngine {
     // object-fit: cover 让视频内容铺满整个元素（裁剪多余部分），
     // 与手机系统相机的全屏预览行为一致。
     // 内部追踪算法依然使用原始 4:3 帧数据计算位姿，识别精度不变。
+    //
+    // ⚠️ cover 会放大并裁切画面（竖屏手机上横向可裁掉近百像素），
+    //    渲染层必须按"可见区域"重算 FOV，否则模型会画到被裁掉的区域里
+    //    —— 表现为桌面正常、手机完全看不到（详见 _applyCoverProjection）。
     if (this.mindAR.video) {
       this.mindAR.video.style.objectFit = "cover";
     }
 
+    // 8b. 摄像头流降规格（移动端）
+    //     MindAR 1.2.5 的 getUserMedia 传的是 `video: {}`（无任何尺寸约束），
+    //     手机因此可能给出 1280×720/1920×1080 的流。该流的每一帧都要过
+    //     TF.js 特征检测 + 纹理上传，是手机上最大的一笔固定开销。
+    //     这里在 start() 之后用 applyConstraints 收紧到 640×480：
+    //       - 追踪精度几乎不变（MindAR 内部本来就会缩到低分辨率做检测）
+    //       - 每帧纹理上传量与特征运算量显著下降
+    //     ⚠️ 官方 1.2.5 **没有** resolution/setResolution/targetFPS 这些参数
+    //        （那是社区 fork 的功能），所以只能走 applyConstraints 这条路。
+    await this._capCameraStreamForMobile();
+
     // 9. 提取垂直 FOV，用屏幕实际 aspect 重建投影
     // （保留 FOV 精度，修正 aspect 以消除 4:3 → 20:9 导致的模型拉伸）
-    {
-      const proj = this.mindAR.camera.projectionMatrix.elements;
-      const tanHalfFov = 1 / Math.abs(proj[5]);
-      this._verticalFov = THREE.MathUtils.radToDeg(2 * Math.atan(tanHalfFov));
-
-      const w = this.container.clientWidth;
-      const h = this.container.clientHeight;
-      this.mindAR.camera.fov = this._verticalFov;
-      this.mindAR.camera.aspect = w / h;
-      this.mindAR.camera.updateProjectionMatrix();
-
-      this.mindAR.renderer.setSize(w, h);
-      if (this.mindAR.cssRenderer) this.mindAR.cssRenderer.setSize(w, h);
-    }
+    this._applyCoverProjection();
 
     // 11. 启动 Three.js 渲染循环（带 delta 时间用于动画更新）
     let lastW = this.container.clientWidth;
@@ -605,13 +724,13 @@ export class AREngine {
         if (cw !== lastW || ch !== lastH) {
           lastW = cw;
           lastH = ch;
-          this.mindAR.camera.aspect = cw / ch;
-          this.mindAR.camera.updateProjectionMatrix();
-          this.mindAR.renderer.setSize(cw, ch);
-          if (this.mindAR.cssRenderer) this.mindAR.cssRenderer.setSize(cw, ch);
+          // 尺寸变化时重算投影：必须走 cover 补偿，否则 FOV 会退回"整帧可见"的假设
+          this._applyCoverProjection();
         }
         this._updateAnchorPose();
         // 每帧确保 FOV 和 aspect 正确（防止 MindAR 内部修改投影矩阵）
+        // ⚠️ 这里是 _verticalFov 的另一个写入方：当容器尺寸未变时，直接沿用
+        //    _applyCoverProjection 算出的补偿后 FOV；不能用 cw/ch 覆盖 aspect 而不重算 FOV。
         this.mindAR.camera.fov = this._verticalFov;
         this.mindAR.camera.aspect = cw / ch;
         this.mindAR.camera.updateProjectionMatrix();
@@ -663,10 +782,24 @@ export class AREngine {
         this._loadVideo(anchor.group);
       } else if (this.config.modelUrl) {
         this._onModelStatus?.('loading', 0);
+        // 与网页编辑器预览（ArPreview3D）的尺寸约定严格对齐：
+        //   预览中目标图固定为 0.3m 宽卡片，模型最长边 = 0.12 × scale (米)。
+        // AR 侧假定打印的目标图实际宽 0.3m。
+        //
+        // wrapper 是 anchor.group 的子节点，而 anchor.group 的尺度已由
+        // _captureAnchorScale 恢复为图宽像素数 W（见 _updateAnchorPose）。
+        // 因此这里只需要给"米"换算成"图宽的比例单位"：
+        //   目标模型世界宽度(米) = 0.12 × scale × maxDim/W  ← wrapper.scale
+        //   乘以父级尺度 W → 世界宽度 = 0.12 × scale × maxDim  ❌ 少了 /0.3
+        // 即 wrapper.scale 必须 = 0.12·scale / 0.3，与父级尺度无关。
+        // ⚠️ 不要再乘 W：那会把尺度放大 W 倍（曾经的重复补偿 bug）。
+        const fitMaxDimUnits = this.trackingType === "image"
+          ? 0.12 * (this.config.scale ?? 1) / 0.3
+          : undefined;
         this.loadModel(this.config.modelUrl, anchor, (pct) => {
           this._onModelStatus?.('loading', pct);
           onProgress?.(pct);
-        }).then(() => {
+        }, fitMaxDimUnits).then(() => {
           anchor.group.remove(placeholder);
           placeholder.geometry.dispose();
           placeholder.material.dispose();
@@ -700,8 +833,10 @@ export class AREngine {
     if (parent === this._placementGroup) {
       wrapper.position.set(0, 0, 0);
     } else {
+      // image 路径同样要做 米 → anchor 单位 换算，理由见 loadModel 内注释
       const pos = this.config.position;
-      wrapper.position.set(pos[0], pos[1], pos[2]);
+      const toUnits = this._metersToAnchorUnits();
+      wrapper.position.set(pos[0] * toUnits, pos[1] * toUnits, pos[2] * toUnits);
     }
     parent.add(wrapper);
     this._modelWrapper = wrapper;
@@ -722,21 +857,27 @@ export class AREngine {
         }).catch(() => {})
       }
       // 追踪到目标后自动播放，丢失后暂停
+      // ⚠️ 这里在原有的内部状态处理之上**追加**播放/暂停，不能整体替换 ——
+      //    否则 `_isReacquisition` / `_smoothReady` 的重置会丢失（见 onTrackingStatus setter 的说明）。
       if (this.anchor) {
+        const prevFound = this.anchor.onTargetFound;
+        const prevLost = this.anchor.onTargetLost;
         this.anchor.onTargetFound = () => {
-          this._trackingFound = true
-          this._lostFrameCount = 0
-          this._onTrackingStatus?.(true)
-          this._smoothReady = false
-          tryPlay()
-        }
+          this._trackingFound = true;
+          this._lostFrameCount = 0;
+          this._isReacquisition = this._hasEverTracked;
+          this._smoothReady = false;
+          this._onTrackingStatus?.(true);
+          prevFound?.();
+          tryPlay();
+        };
         this.anchor.onTargetLost = () => {
-          this._trackingFound = false
-          this._lostFrameCount = 0
-          this._onTrackingStatus?.(false)
-          this._smoothReady = false
-          player.pause()
-        }
+          this._trackingFound = false;
+          this._lostFrameCount = 0;
+          this._onTrackingStatus?.(false);
+          prevLost?.();
+          player.pause();
+        };
       }
     }).catch((err) => {
       console.error('[AREngine] 视频加载失败:', err)
@@ -1018,6 +1159,8 @@ export class AREngine {
 
     // 12. 点击放置
     const doPlace = () => {
+      // PvZ 模式：棋盘已放置后，点击交给游戏（种植/收集），不再重复放置
+      if (this.config.pvzConfig?.enabled && this._pvz) return;
       if (this._hasPlaced) return;
       this._hasPlaced = true;
 
@@ -1058,16 +1201,35 @@ export class AREngine {
             this._modelWrapper = null;
           }
         } else {
-          // 重置 wrapper 位置到 (0,0,0)：_placementGroup 已携带偏移量，
-          // wrapper 在组内必须位于原点，否则反旋转时仍会摆动
+          // 重置 wrapper 位置到 config.position：_placementGroup 已携带偏移量，
+          // wrapper 在组内必须位于原点，否则反旋转时仍会摆动。
+          // ⚠️ markerless 路径 _metersToAnchorUnits() 恒返回 1（_placementGroup 尺度=1），
+          // 因此这里写成带换算的通用式，既能给 image 复用，也不会改变 markerless 行为。
           if (this._modelWrapper) {
-            this._modelWrapper.position.set(0, 0, 0);
+            const pos = this.config.position;
+            const inPlacementGroup =
+              !!this._modelWrapper.parent && this._modelWrapper.parent === this._placementGroup;
+            if (inPlacementGroup || !pos) {
+              this._modelWrapper.position.set(0, 0, 0);
+            } else {
+              const u = this._metersToAnchorUnits();
+              this._modelWrapper.position.set(pos[0] * u, pos[1] * u, pos[2] * u);
+            }
           }
         }
         this._onModelStatus?.('loaded');
       };
 
-      if (this.config.videoUrl) {
+      if (this.config.pvzConfig?.enabled) {
+        if (!this._pvz) {
+          this._pvz = new PvzController({
+            group: this._placementGroup!, scene, camera,
+            container: this.container, config: this.config.pvzConfig,
+          });
+          this._pvz.start();
+          this._onModelStatus?.('loaded');
+        }
+      } else if (this.config.videoUrl) {
         this._onModelStatus?.('loading', 0);
         this._loadVideo(this._placementGroup!).then(onLoadComplete).catch(() => {});
       } else if (this.config.modelUrl) {
@@ -1084,6 +1246,7 @@ export class AREngine {
     };
     container.addEventListener('click', doPlace);
     container.addEventListener('touchstart', onPlaceTouch, { passive: true });
+    this._markerlessCleanups.push(() => { this._pvz?.dispose(); this._pvz = null; });
     this._markerlessCleanups.push(
       () => container.removeEventListener('click', doPlace),
       () => container.removeEventListener('touchstart', onPlaceTouch as EventListener),
@@ -1106,6 +1269,9 @@ export class AREngine {
       const ch = container.clientHeight;
       camera.aspect = cw / ch;
       camera.updateProjectionMatrix();
+      // 与 _applyCoverProjection 一致：先压 pixelRatio 再 setSize
+      const capped = Math.min(window.devicePixelRatio || 1, 2);
+      if (Math.abs((renderer.getPixelRatio?.() ?? 1) - capped) > 0.001) renderer.setPixelRatio(capped);
       renderer.setSize(cw, ch);
     };
 
@@ -1211,7 +1377,340 @@ export class AREngine {
     this.started = true;
     console.log('[AREngine] markerless AR 已启动，等待点击放置');
   }
-  private loadModel(url: string, anchor: any, onProgress?: (pct: number) => void): Promise<void> {
+  /**
+   * MindAR image 路径的尺度补偿：返回目标图宽在 anchor 空间里的单位数。
+   * anchor 空间约定：目标图宽 = .mind 里存的像素宽（postMatrix 的 scale.x）。
+   * 任何异常都回落 1（不补偿）。
+   */
+  private _mindarImageScaleBoost(): number {
+    try {
+      const idx = this._activeImageIndex ?? 0;
+      const pm = (this.mindAR as any)?.postMatrixs?.[idx];
+      const w = pm ? pm.elements[0] : 0;
+      return Number.isFinite(w) && w > 1 ? w : 1;
+    } catch {
+      return 1;
+    }
+  }
+
+  /**
+   * 按 object-fit: cover 的可见区域重建相机投影。
+   *
+   * 为什么必须做：
+   *   video 元素被 CSS 设成 object-fit:cover，画面按比例放大到铺满容器后再裁切。
+   *   竖屏手机（容器 390x844，相机 4:3=640x480）实测：视频被放大 2.885 倍，
+   *   左右各裁掉 367.7px（约容器宽的 94%）。而渲染层若仍用 containerW/containerH
+   *   当 aspect，就等于假设"整帧 4:3 都可见"——投影与实际显示区域完全错位，
+   *   模型会被画到被裁掉的那部分里。
+   *
+   *   桌面窗口接近 4:3 时裁切量极小 → 看不出问题；手机竖屏裁切巨大 → 模型直接出屏。
+   *   这正是"桌面正常、手机完全看不到"的根因。
+   *
+   * 做法：
+   *   1. 用 MindAR 原始投影矩阵反解"整帧"的垂直 FOV（相机内参，不受 CSS 影响）
+   *   2. 按 cover 规则算出视频显示尺寸（dw,dh）
+   *   3. 垂直方向可见比例 = containerH / dh；FOV 按该比例收窄
+   *      （缩放后的画面看到的垂直范围变小 → FOV 变小）
+   *   4. aspect 用容器真实比例，这样 NDC 与屏幕像素一一对应
+   *
+   * 未识别到可用 video 尺寸时回落原来的简单实现，保证不劣化。
+   */
+  private _applyCoverProjection(): void {
+    const camera = this.mindAR?.camera;
+    if (!camera) return;
+
+    const w = this.container.clientWidth;
+    const h = this.container.clientHeight;
+    if (w <= 0 || h <= 0) return;
+
+    // 相机内参：整帧的垂直 FOV（只依赖摄像头，与 CSS/容器无关）
+    const proj = camera.projectionMatrix.elements;
+    const tanHalfFov = 1 / Math.abs(proj[5]);
+    const fullFov = THREE.MathUtils.radToDeg(2 * Math.atan(tanHalfFov));
+    this._verticalFov = fullFov;
+
+    const video = this.mindAR.video;
+    const vw = video?.videoWidth || 0;
+    const vh = video?.videoHeight || 0;
+
+    let fov = fullFov;
+    if (vw > 0 && vh > 0) {
+      const videoRatio = vw / vh;
+      const containerRatio = w / h;
+      // 复刻 MindAR resize() 的 cover 尺寸计算
+      let dw: number;
+      let dh: number;
+      if (videoRatio > containerRatio) {
+        dh = h;
+        dw = h * videoRatio;
+      } else {
+        dw = w;
+        dh = w / videoRatio;
+      }
+      // 垂直可见比例：容器高 / 视频显示高（<=1）。>1 时说明上下有留白，不放大 FOV
+      const visibleV = Math.min(1, h / dh);
+      // 水平可见比例（用于极端情况下的参考；此处 FOV 走垂直通道）
+      const visibleH = Math.min(1, w / dw);
+      // tan 空间线性缩放，再转回角度；保证小角度与大角度都正确
+      fov = THREE.MathUtils.radToDeg(2 * Math.atan(tanHalfFov * visibleV));
+      if (Math.abs(visibleV - 1) > 0.001 || Math.abs(visibleH - 1) > 0.001) {
+        console.log(
+          `[AREngine] cover 裁切补偿: video ${vw}x${vh} → 显示 ${dw.toFixed(0)}x${dh.toFixed(0)}, ` +
+          `可见比例 V=${visibleV.toFixed(3)} H=${visibleH.toFixed(3)}, FOV ${fullFov.toFixed(2)}° → ${fov.toFixed(2)}°`
+        );
+      }
+    }
+
+    camera.fov = fov;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+
+    // ⚠️ setPixelRatio 必须在 setSize 之前：three 的 setSize 用「当前」_pixelRatio
+    //    去算 canvas.width/height，顺序反了会以旧比例开一次缓冲。
+    //    MindAR 自己的 resize() 不带 pixelRatio 限制，DPR=3 的手机缓冲会大到
+    //    3×3=9 倍像素，重模型下这是上下文丢失的主要推手 —— 这里统一压到 2。
+    const r = this.mindAR.renderer;
+    if (r) {
+      const capped = Math.min(window.devicePixelRatio || 1, 2);
+      if (Math.abs((r.getPixelRatio?.() ?? 1) - capped) > 0.001) r.setPixelRatio(capped);
+      r.setSize(w, h);
+    }
+    if (this.mindAR.cssRenderer) this.mindAR.cssRenderer.setSize(w, h);
+  }
+
+  /**
+   * 从 MindAR 的 postMatrix 捕获 anchor 尺度与原点偏移，写入 _capturedScl / _anchorOrigin。
+   *
+   * 为什么必须做：_updateAnchorPose 每帧覆写 group.matrix（compose(pos, quat, scl)），
+   * 等于把 MindAR 的 postMatrix 整个丢掉。postMatrix = compose((w/2, h/2, 0), I, (w,w,w))，
+   * 丢掉后尺度从 w(≈291) 塌成 1、原点偏移也丢失 → 模型缩到不可见且位置错乱。
+   *
+   * 非 image 路径（face / markerless）不调用，_capturedScl 保持 (1,1,1)。
+   */
+  private _captureAnchorScale(): void {
+    if (this.trackingType !== 'image') return;
+    try {
+      const idx = this._activeImageIndex ?? 0;
+      const pm = (this.mindAR as any)?.postMatrixs?.[idx];
+      if (!pm) return;
+      const w = pm.elements[0];
+      const tx = pm.elements[12];
+      const ty = pm.elements[13];
+      if (!Number.isFinite(w) || w <= 0) return;
+      // 归一化因子的作用域严格限定在「anchor 内部」：
+      //   group.matrix = compose(anchorPos − O, anchorQuat, S)，S = w。
+      // wrapper 是 group 的子节点，因此 wrapper.position 的单位是「锚点像素单位」，
+      // 而不是米。所以 _invCapturedScl 只能用于反解 group.matrix，绝不能碰
+      // wrapper.position —— 那会造成双重换算（曾经写过的 bug）。
+      this._capturedScl.set(w, w, w);
+      this._invCapturedScl.set(1 / w, 1 / w, 1 / w);
+      this._anchorOrigin.set(
+        Number.isFinite(tx) ? tx : 0,
+        Number.isFinite(ty) ? ty : 0,
+        0
+      );
+      // 统一换算因子在尺度确定后集中计算一次，避免各调用点各算一遍漂移
+      this._unitsPerMeter = w / AREngine._ASSUMED_TARGET_WIDTH_M;
+      this._anchorScaleCaptured = true;
+      console.log(
+        `[AREngine] anchor 尺度已捕获: ${w} (origin ${this._anchorOrigin.x}, ${this._anchorOrigin.y}) ` +
+        `→ 1m = ${this._unitsPerMeter.toFixed(1)} anchor 单位`
+      );
+    } catch (e: any) {
+      console.warn('[AREngine] anchor 尺度捕获失败:', e?.message);
+    }
+  }
+
+  /**
+   * 「米 → anchor 像素单位」的统一换算系数。
+   *
+   * 只在 image 路径下 ≠ 1：
+   *   markerless 的 position 落在 _placementGroup（尺度=1）→ 单位本来就是米；
+   *   image 的 position 落在 anchor.group 下（父级尺度 = 图宽 291）→ 同一个 0.15
+   *   会被放大成 43.6 个 anchor 单位，手机窄屏直接出屏。
+   *
+   * 约定同 fitMaxDimUnits：假定打印的目标图实际宽 0.3m。
+   * 与 _mindarImageScaleBoost() 的区别：那个每次去读 postMatrix（多目标切换后
+   * 可能瞬时不一致），这里读 _captureAnchorScale 落下的缓存，单一真源。
+   * 未捕获前回落 1:1，不制造新偏差。
+   */
+  private _metersToAnchorUnits(): number {
+    if (this.trackingType !== 'image' || !this._anchorScaleCaptured) return 1;
+    return this._unitsPerMeter;
+  }
+
+  /**
+   * 绑定 WebGL 上下文丢失/恢复监听。
+   *
+   * 上下文丢失是「识别成功但看不到」最容易被误判的成因：追踪线程、锚点矩阵、
+   * DOM 全部正常，只有 GPU 侧的内容没了，所以任何只查矩阵数值的排查都会通过。
+   * 丢失后必须 preventDefault，否则浏览器不会触发 restored。
+   */
+  private _bindContextLossWatcher(renderer: THREE.WebGLRenderer): void {
+    try {
+      const cv = renderer.domElement;
+      if (!cv || (cv as any).__ctxWatchBound) return;
+      (cv as any).__ctxWatchBound = true;
+
+      cv.addEventListener('webglcontextlost', (e: Event) => {
+        e.preventDefault(); // 不加这句 browser 不会尝试恢复
+        this._contextLost = true;
+        console.error(
+          '[AREngine] WebGL 上下文丢失 —— 模型会消失但追踪仍在运行。' +
+          '通常是显存/算力超限（贴图过大、面数过高、DPR 过高）。'
+        );
+        this._onModelStatus?.('error');
+      }, false);
+
+      cv.addEventListener('webglcontextrestored', () => {
+        this._contextLost = false;
+        console.warn('[AREngine] WebGL 上下文已恢复');
+      }, false);
+    } catch (e: any) {
+      console.warn('[AREngine] 上下文监听绑定失败:', e?.message);
+    }
+  }
+
+  /** 运行期 WebGL 上下文是否处于丢失状态（诊断面板 / 上层 UI 可直接读） */
+  get isContextLost(): boolean {
+    if (this._contextLost) return true;
+    try {
+      return this.mindAR?.renderer?.getContext?.()?.isContextLost?.() ?? false;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 按设备能力给模型贴图降规格（仅改内存占用，不改外形）。
+   *
+   * 为什么必须做：
+   *   本场景实测三张贴图均为 2048×2048 RGB，加载进 GPU 后每张约 21.4MB
+   *   （RGBA 展开 + mipmap），合计 ≈ 64.3MB；再叠加 78.7 万三角面的顶点/索引缓冲。
+   *   桌面显存宽裕完全无感，但手机 GPU 纹理预算小得多，超限时驱动的行为是
+   *   **静默丢弃 WebGL 上下文** —— 用户看到的现象正是"识别成功了但什么都没有"。
+   *
+   * 做法：
+   *   - 只在「移动/低内存」设备上降规格，桌面保持原始画质（不做无谓劣化）
+   *   - 边长 > maxSize 的贴图，用 canvas 等比缩小后替换 image
+   *   - 关闭 mipmap 对超大贴图反而更省（但会牺牲远景画质），这里保守：保留 mipmap
+   *   - 任一环节失败都只警告不抛 —— 降级不能变成新的故障点
+   *
+   * 阈值依据：1024² 贴图 4 张 ≈ 21MB，配合百万级三角面在主流手机上安全。
+   */
+  private _applyMobileTextureBudget(root: THREE.Object3D): void {
+    try {
+      // 判定：DPR 高 或 内存少 或 触屏为主 → 视为移动端
+      const mem = (navigator as any)?.deviceMemory as number | undefined;
+      const isMobile =
+        /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) ||
+        (typeof mem === 'number' && mem > 0 && mem <= 4) ||
+        (window.matchMedia?.('(pointer: coarse)').matches ?? false);
+      if (!isMobile) return;
+
+      const memTight = typeof mem === 'number' && mem > 0 && mem <= 4;
+      const maxSize = memTight ? 512 : 1024;
+
+      const seen = new Set<THREE.Texture>();
+      let shrunk = 0;
+      const textures: THREE.Texture[] = [];
+      root.traverse((o: any) => {
+        const mats: any[] = o.material
+          ? (Array.isArray(o.material) ? o.material : [o.material])
+          : [];
+        for (const m of mats) {
+          // 只关心真正参与采样的色彩/法线/粗糙度贴图；emissive 等一并覆盖
+          for (const key of [
+            'map', 'normalMap', 'roughnessMap', 'metalnessMap',
+            'aoMap', 'emissiveMap', 'alphaMap', 'specularMap',
+          ] as const) {
+            const t = (m as any)[key] as THREE.Texture | undefined;
+            if (t && !seen.has(t)) { seen.add(t); textures.push(t); }
+          }
+        }
+      });
+
+      for (const t of textures) {
+        const img = t.image as any;
+        const w = img?.width | 0;
+        const h = img?.height | 0;
+        if (w <= maxSize && h <= maxSize) continue;
+
+        // 等比缩放到 maxSize 以内
+        const k = maxSize / Math.max(w, h);
+        const nw = Math.max(1, Math.round(w * k));
+        const nh = Math.max(1, Math.round(h * k));
+
+        const cv = document.createElement('canvas');
+        cv.width = nw; cv.height = nh;
+        const ctx2d = cv.getContext('2d');
+        if (!ctx2d) continue;
+        ctx2d.drawImage(img, 0, 0, nw, nh);
+
+        // 保留色彩空间/包裹等采样状态，只换图像源
+        t.image = cv;
+        t.needsUpdate = true;
+        shrunk++;
+        console.log(`[AREngine] 贴图降规格 ${w}x${h} → ${nw}x${nh} (${key(t)})`);
+      }
+
+      if (shrunk > 0) {
+        console.log(
+          `[AREngine] 移动端贴图预算已应用: ${shrunk} 张 → 上限 ${maxSize}px ` +
+          `(deviceMemory=${mem ?? 'n/a'})`
+        );
+      }
+    } catch (e: any) {
+      // 降级失败不影响主流程，只是没省到显存
+      console.warn('[AREngine] 贴图降规格跳过:', e?.message);
+    }
+
+    function key(t: THREE.Texture): string {
+      return (t as any).name || ((t as any).uuid?.slice(0, 8) ?? 'tex');
+    }
+  }
+
+  /**
+   * 移动端摄像头流降规格到 640×480。
+   *
+   * 为什么走 applyConstraints 而不是构造参数：
+   *   mind-ar 1.2.5 的 getUserMedia 只传 `video: {}`，且构造参数里
+   *   **没有** resolution / setResolution / targetFPS（那些是社区 fork 新增的）。
+   *   写进去会被静默忽略 —— 那才是真正的"改了个寂寞"。
+   *   官方路径只有一条：拿到 MediaStream 后自行 applyConstraints。
+   *
+   * 失败不抛：部分设备/浏览器不支持中途改约束，此时保持原流即可，
+   * 不能因为"优化没生效"把 AR 整个搞挂。
+   */
+  private async _capCameraStreamForMobile(): Promise<void> {
+    try {
+      const mem = (navigator as any)?.deviceMemory as number | undefined;
+      const isMobile =
+        /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) ||
+        (typeof mem === 'number' && mem > 0 && mem <= 4) ||
+        (window.matchMedia?.('(pointer: coarse)').matches ?? false);
+      if (!isMobile) return;
+
+      const video = this.mindAR?.video as HTMLVideoElement | undefined;
+      const stream = video?.srcObject as MediaStream | null | undefined;
+      const track = stream?.getVideoTracks?.()[0];
+      if (!track?.applyConstraints) return;
+
+      const before = track.getSettings?.() ?? {};
+      await track.applyConstraints({
+        width: { ideal: 640 },
+        height: { ideal: 480 },
+      });
+      const after = track.getSettings?.() ?? {};
+      console.log(
+        `[AREngine] 移动端摄像头降规格: ${before.width}x${before.height} → ${after.width}x${after.height}`
+      );
+    } catch (e: any) {
+      console.warn('[AREngine] 摄像头降规格跳过（保持原流）:', e?.message);
+    }
+  }
+
+  private loadModel(url: string, anchor: any, onProgress?: (pct: number) => void, fitMaxDimUnits?: number): Promise<void> {
     return new Promise((resolve, reject) => {
       const loader = new GLTFLoader();
 
@@ -1233,9 +1732,27 @@ export class AREngine {
           // markerless 路径：_placementGroup 已携带偏移量，wrapper 在组内必须 (0,0,0)
           if (anchor.group !== this._placementGroup) {
             const pos = this.config.position;
-            wrapper.position.set(pos[0], pos[1], pos[2]);
+            /*
+             * ⚠️ 单位换算（"平面能跑、image 跑不了"的根本差异）：
+             *   markerless：position 落在 _placementGroup（尺度=1）→ 单位就是米，0.15 = 0.15m。
+             *   image     ：position 落在 anchor.group 下（尺度=图宽 291）→ 同一个 0.15
+             *               会被放大成 43.6 个 anchor 单位（≈ 图片高的 15%），手机窄屏直接出屏。
+             * 因此 image 路径必须把米换算成 anchor 单位：米 × (图宽像素 / 假定图宽 0.3m)。
+             * 系数由 _captureAnchorScale 统一算出（_metersToAnchorUnits），
+             * 与 fitMaxDimUnits 同源（都假定打印图实际宽 0.3m）。
+             * 未捕获到尺度时回落 1:1，不制造新的偏差。
+             */
+            const toUnits = this._metersToAnchorUnits();
+            wrapper.position.set(pos[0] * toUnits, pos[1] * toUnits, pos[2] * toUnits);
           }
-          wrapper.scale.setScalar(this.config.scale);
+          // image 路径：fitMaxDimUnits = 模型最长边的目标单位数（与 ArPreview3D 预览一致），
+          // 按模型原始最长边归一化 —— 预览里多大，AR 里相对图片就多大
+          const rawMaxDim = Math.max(box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z);
+          if (fitMaxDimUnits && rawMaxDim > 0) {
+            wrapper.scale.setScalar(fitMaxDimUnits / rawMaxDim);
+          } else {
+            wrapper.scale.setScalar(this.config.scale);
+          }
 
           /*
            * 动效层：自转 / 悬浮 / 脉冲 / 进场都作用在它上面。
@@ -1259,6 +1776,13 @@ export class AREngine {
           } else {
             this._modelWrapper = wrapper;
           }
+
+          // ── 移动端 GPU 保护 ──
+          // 实测本场景三张贴图各 2048×2048（RGBA+mipmap ≈ 21.4MB/张，合计 64.3MB）
+          // 叠加 78.7 万三角面。桌面上无感，但手机 GPU 的纹理预算紧张，
+          // 超限时表现为「识别成功但画面全黑 / 模型消失」——上下文被驱动悄悄丢掉。
+          // 降规格不改变外观可见度，却能把纹理占用砍到 1/4。
+          this._applyMobileTextureBudget(gltf.scene);
 
           // 检测并初始化动画
           const animations = gltf.animations;
@@ -1463,6 +1987,8 @@ export class AREngine {
     const wrapper = this._modelWrapper;
     this._activeImageIndex = nextIndex;
     this.anchor = next.anchor;
+    // 不同 target 的 markerWidth 可能不同 → 尺度/原点必须跟着切换
+    this._captureAnchorScale();
     console.log(`[AREngine] 多目标切换：target#${prevIndex} -> target#${nextIndex}`);
     this.config.onActiveTargetChange?.(nextIndex);
     this._switchBlend = null;
@@ -1483,14 +2009,17 @@ export class AREngine {
     local.decompose(p, q, s);
     wrapper.position.copy(p);
     wrapper.quaternion.copy(q);
-    // 稳态局部变换 = config.position（wrapper.position 的常规值）
+    // 稳态局部变换 = config.position 换算到本 anchor 单位后的值
+    // （不同 target 的图宽不同 → 同一"米"在新 anchor 里对应的单位数也不同，
+    //  _captureAnchorScale 已在本方法开头更新 _unitsPerMeter，这里必须重算）
     const pos = this.config.position ?? [0, 0, 0];
+    const u = this._metersToAnchorUnits();
     this._switchBlend = {
       startedAt: performance.now(),
       duration: 300,
       fromPos: p.clone(),
       fromQuat: q.clone(),
-      toPos: new THREE.Vector3(pos[0], pos[1], pos[2]),
+      toPos: new THREE.Vector3(pos[0] * u, pos[1] * u, pos[2] * u),
       toQuat: new THREE.Quaternion(),
     };
   }
@@ -1515,15 +2044,44 @@ export class AREngine {
     // 分解追踪矩阵获取实时位姿
     group.matrix.decompose(this._trackPos, this._trackQuat, this._trackScl);
 
-    // 追踪有效性检查：零向量 = 未检测到目标
-    const validTrack = this._trackPos.lengthSq() > 0.00001;
+    /*
+     * ⚠️ 反归一化：group.matrix 是本引擎上一帧自己写入的（含 _capturedScl 缩放与
+     * -_anchorOrigin 偏移）。若直接拿它当输入，每帧都会再乘一次 291，形成正反馈——
+     * 实测 anchorWorld 从 -8.6e4 涨到 -2.0e13（约每 5 秒立方级爆炸）。
+     * 这里先把位置还原回 MindAR 原生（归一化）空间，后续所有平滑状态、死区阈值、
+     * 置信度计算都在该空间进行，最后写出时再统一乘以 _capturedScl。
+     */
+    if (this.trackingType === 'image' && this._anchorScaleCaptured) {
+      // 写出式为 w = n·S − O，其严格逆变换即 n = (w + O) / S
+      this._trackPos.add(this._anchorOrigin).multiply(this._invCapturedScl);
+    }
+
+    /*
+     * ⚠️ 追踪有效性必须用 MindAR 的 `anchor.visible`，**不能**用"位置是否为零"。
+     *
+     * 曾经的判据是 `_trackPos.lengthSq() > 0.00001`，但那是**错的**：
+     * `_trackPos` 由 `group.matrix` decompose 而来，而 `group.matrix` 恰恰是
+     * 本引擎上一帧自己写进去的。即便 MindAR 这一帧完全没给位姿（目标丢失），
+     * 矩阵里仍是引擎的旧值 → 位置永远非零 → `validTrack` 恒为 true。
+     * 结果：引擎**永远察觉不到丢失**，一直拿旧位姿当"实时位姿"平滑，
+     * 目标重新出现时又走一次"重捕获重置"，视觉上就是
+     * 「模型不断刷新、向目标靠近一点又弹回原点」的循环。
+     *
+     * MindAR 内部（image-target/three.js:165）已经维护了准确标志：
+     *   group.visible = (worldMatrix !== null)        // 这一帧有没有解出位姿
+     * 并且丢失时它写入的是 `invisibleMatrix`（前三列为零），只是被本引擎的
+     * 覆写逻辑盖掉了 —— 所以必须读 `anchor.visible`，而不是猜矩阵内容。
+     */
+    const mindarHasPose = (this.anchor as any)?.visible !== false;
+    const validTrack = mindarHasPose && this._trackingFound;
 
     // ── 可选冻结模式（默认关闭，极少使用） ──
     if (this._freezeOnDetect) {
       if (this._frozen) {
-        this._finalPos.copy(this._frozenPos).add(this._touchOffset);
-        this._tempMatrix.identity().compose(this._finalPos, this._frozenQuat, this._frozenScl);
+        this._finalPos.copy(this._frozenPos).add(this._touchOffset).multiply(this._capturedScl).sub(this._anchorOrigin);
+        this._tempMatrix.identity().compose(this._finalPos, this._frozenQuat, this._capturedScl);
         group.matrix.copy(this._tempMatrix);
+        group.matrixWorldNeedsUpdate = true;
         if (this._modelWrapper) this._modelWrapper.quaternion.copy(this._touchRot);
         for (const zi of this._anchors) {
           if (zi.anchor === this.anchor) continue;
@@ -1599,12 +2157,20 @@ export class AREngine {
     this._gyroRunningStd = Math.max(this._gyroRunningStd, 0.0001); // clamp 防退化
 
     // -- 丢失追踪处理 --
-    if (!validTrack || !this._trackingFound) {
+    // ⚠️ `group.matrix` 是**我们自己**每帧写回去的，所以仅凭 group.matrix 反解出的
+    //    `_trackPos` 判断"追踪是否有效"是自反馈：值永远非零 → 永远 validTrack=true
+    //    → 引擎永远察觉不到丢失，丢失期间仍拿旧位姿继续平滑，视觉上就是
+    //    "模型一直在但位置不停刷新回弹"。
+    //    真正的判据是 MindAR 写入的 `anchor.visible`（three.js:165-177：
+    //    `group.visible = worldMatrix !== null`，丢失时 worldMatrix 为 null）。
+    //    现改为 `validTrack = mindarHasPose && this._trackingFound`（见上方计算）。
+    if (!validTrack) {
       this._lostFrameCount++;
       if (this._lostFrameCount <= this._maxLostFrames) {
         // 保持最后已知位置
         this._tempMatrix.identity().compose(this._smoothPos, this._smoothQuat, this._capturedScl);
         group.matrix.copy(this._tempMatrix);
+        group.matrixWorldNeedsUpdate = true;
       }
       // 更新 modelWrapper 和 anchors
       if (this._modelWrapper) this._modelWrapper.quaternion.copy(this._touchRot);
@@ -1620,6 +2186,11 @@ export class AREngine {
     if (!this._smoothReady) {
       this._lockedPos.copy(this._trackPos);
       this._lockedQuat.copy(this._trackQuat);
+      // ⚠️ 逆深度状态必须一并重置：否则用的是**上一段追踪**的 _invDepth 当起点，
+      //    SLOW/FAST 分支里 `_smoothPos.z = 1 / _invDepth` 会先把 z 跳到旧值附近，
+      //    再慢慢爬向新的 trackPos.z —— 正是用户描述的"靠近一点又弹回去"。
+      this._invDepth = 1 / this._depthMagnitude(this._trackPos.z);
+      this._rawInvDepth = this._invDepth;
       this._smoothReady = true;
       this._hasEverTracked = true;
       this._stationaryFrameCount = 0;
@@ -1647,6 +2218,7 @@ export class AREngine {
       }
 
       group.matrix.copy(this._tempMatrix);
+      group.matrixWorldNeedsUpdate = true;
       if (this._modelWrapper) this._modelWrapper.quaternion.copy(this._touchRot);
       for (const zi of this._anchors) {
         if (zi.anchor === this.anchor) continue;
@@ -1710,13 +2282,36 @@ export class AREngine {
     }
 
     // -- 状态切换处理 --
-    if (newState === 'STATIONARY' && this._motionState !== 'STATIONARY') {
-      this._lockedPos.copy(this._smoothPos);
-      this._lockedQuat.copy(this._smoothQuat);
+    if (newState === 'STATIONARY') {
+      /**
+       * ⚠️ 锁定值必须"收敛"而不是"取快照"。
+       *
+       * 原实现只在刚进入 STATIONARY 的那一帧 `_lockedPos.copy(_smoothPos)`，
+       * 之后再不更新。而这一刻恰恰是追踪最不稳的时候（刚识别、PnP 首帧抖动大、
+       * 手机还在举起来的过程中），于是整个静止期都被钉在那一帧的误差上 ——
+       * 真机表现为"模型闪一下就固定在一个不对的位置/干脆移出画面"。
+       *
+       * 改为在 STATIONARY 期间持续用 EMA 收敛到 `_trackPos`：
+       * 帧数越多越接近真实位姿，既保留"静止不抖"的收益，又不会锁死错误值。
+       */
+      if (this._motionState !== 'STATIONARY') {
+        // 刚进入：用当前平滑值作为起点，避免跳变
+        this._lockedPos.copy(this._smoothPos);
+        this._lockedQuat.copy(this._smoothQuat);
+      } else {
+        // 静止中：低频收敛（系数小，肉眼仍看不出抖动）
+        const k = AREngine._STATIONARY_CONVERGE;
+        this._lockedPos.lerp(this._trackPos, k);
+        this._lockedQuat.slerp(this._trackQuat, k);
+      }
     }
     if (this._motionState === 'STATIONARY' && newState !== 'STATIONARY') {
       this._justExitedStationary = true;
     }
+    // ⚠️ _lockedPos 必须与 _smoothPos 解耦。
+    //    原实现里 STATIONARY 分支是 `_smoothPos.copy(_lockedPos)`，而 _lockedPos
+    //    只在"进入静止的那一帧"取过一次快照（之后永不更新）→ 整段静止期被钉死
+    //    在首帧误差上。改为持续 EMA 收敛后，两者是独立状态，这里不再互相覆盖。
     this._motionState = newState as any;
 
     // -- 应用平滑 --
@@ -1735,11 +2330,16 @@ export class AREngine {
         this._smoothPos.x += (this._trackPos.x - this._smoothPos.x) * damp;
         this._smoothPos.y += (this._trackPos.y - this._smoothPos.y) * damp;
         // Z 轴逆深度 + 置信度自适应阻尼 + 距离感知
-        const distSlow = Math.min(0.5 / Math.max(this._trackPos.z, 0.1), 1.0);
+        // ⚠️ 必须作用在**深度幅度** |z| 上、写出时再补回符号：
+        //    image 追踪的 z 是负数（目标在相机前方），直接 Math.max(z, 0.1)
+        //    会把 −1.509 抬到 +0.1 → invDepth 恒为 10 → 模型跳到相机后方。
+        //    详见 _depthMagnitude。
+        const depthSlow = this._depthMagnitude(this._trackPos.z);
+        const distSlow = Math.min(0.5 / depthSlow, 1.0);
         const zSlowFactor = AREngine._DAMPING_Z_SLOW * (0.5 + effectiveConfidence * 0.5) * distSlow;
-        this._rawInvDepth = 1 / Math.max(this._trackPos.z, 0.1);
+        this._rawInvDepth = 1 / depthSlow;
         this._invDepth += (this._rawInvDepth - this._invDepth) * damp * zSlowFactor;
-        this._smoothPos.z = 1 / this._invDepth;
+        this._smoothPos.z = (1 / this._invDepth) * this._depthSign(this._trackPos.z);
         this._smoothQuat.slerp(this._trackQuat, damp);
         break;
       }
@@ -1750,12 +2350,13 @@ export class AREngine {
         // X/Y 用原阻尼
         this._smoothPos.x += (this._trackPos.x - this._smoothPos.x) * damp;
         this._smoothPos.y += (this._trackPos.y - this._smoothPos.y) * damp;
-        // Z 逆深度 + 置信度自适应阻尼 + 距离感知
-        const distFast = Math.min(0.5 / Math.max(this._trackPos.z, 0.1), 1.0);
+        // Z 逆深度 + 置信度自适应阻尼 + 距离感知（同 SLOW_MOVE，见其注释）
+        const depthFast = this._depthMagnitude(this._trackPos.z);
+        const distFast = Math.min(0.5 / depthFast, 1.0);
         const zFastFactor = AREngine._DAMPING_Z_FAST * (0.5 + effectiveConfidence * 0.5) * distFast;
-        this._rawInvDepth = 1 / Math.max(this._trackPos.z, 0.1);
+        this._rawInvDepth = 1 / depthFast;
         this._invDepth += (this._rawInvDepth - this._invDepth) * damp * zFastFactor;
-        this._smoothPos.z = 1 / this._invDepth;
+        this._smoothPos.z = (1 / this._invDepth) * this._depthSign(this._trackPos.z);
         this._smoothQuat.slerp(this._trackQuat, damp);
         break;
       }
@@ -1792,9 +2393,14 @@ export class AREngine {
     }
 
     // -- 写入矩阵 --
-    this._finalPos.copy(this._smoothPos).add(this._touchOffset);
+    // ⚠️ 必须含 _anchorOrigin：MindAR 的 postMatrix 把目标图原点放在 (w/2, h/2-w/2)。
+    // 只补尺度不补原点，模型会整体偏离目标图 —— 这也是"位置不对"的一半原因。
+    this._finalPos.copy(this._smoothPos).add(this._touchOffset).multiply(this._capturedScl).sub(this._anchorOrigin);
     this._tempMatrix.identity().compose(this._finalPos, this._smoothQuat, this._capturedScl);
     group.matrix.copy(this._tempMatrix);
+    // ⚠️ MindAR 设了 matrixAutoUpdate=false，且 three 不会因 matrix 变更自动标记脏位。
+    // 不置此标志 group.matrixWorld 永不更新，模型世界变换卡死在初始值。
+    group.matrixWorldNeedsUpdate = true;
 
     if (this._modelWrapper) this._modelWrapper.quaternion.copy(this._touchRot);
     for (const zi of this._anchors) {
@@ -1930,6 +2536,7 @@ export class AREngine {
       },
       eightWall: {
         engineUrl: '/8thwall/xr.js',
+        pvzMode: this.config.pvzConfig?.enabled ?? false,
       },
       tracking: {
         filterMinCF: this.config.filterMinCF,
@@ -1939,16 +2546,30 @@ export class AREngine {
     };
 
     await adapter.initialize(this.container, unifiedConfig);
-    await adapter.start();
 
     // ── 桥接闭环：放置后创建追踪→导览桥梁 ──
     // 注意：EightWallAdapter 始终注册平面检测模块（createPlaneDetectionModule），
     // 因此 world 追踪模式下同样会有「点击放置」并触发 onPlaced。
     // 原先仅判断 isPlane，导致 CreateGuide 发布的 trackingType:'world' 导览
     // 永远无法连接 ScenePositionProvider —— manual/vps/ble 定位的导览永不启动。
+    // ⚠️ 必须在 adapter.start() 之前挂 onPlaced：start 在摄像头长时间不就绪时会
+    // 抛错中断本函数，若在其后才赋值，放置回调将永远不会被注册。
     if (isPlane || this.trackingType === 'world' || this.trackingType === 'image') {
       const worldBridge = new ARWorldBridge()
       adapter.onPlaced = (worldPos: THREE.Vector3) => {
+        // 0. PvZ 游戏模式：棋盘挂在 8th Wall 放置组（世界坐标，SLAM 世界锁定）
+        if (this.config.pvzConfig?.enabled && !this._pvz && adapter.placedObject) {
+          this._pvz = new PvzController({
+            group: adapter.placedObject,
+            scene: adapter.scene,
+            camera: adapter.camera,
+            container: this.container,
+            config: this.config.pvzConfig,
+          });
+          this._pvz.start();
+          console.log('[AREngine] PvZ 已在 8th Wall 世界坐标启动（SLAM 世界锁定）');
+        }
+
         // 1. 创建世界锚点
         const anchor = worldBridge.createAnchor('eightwall-placement', worldPos)
 
@@ -1997,6 +2618,8 @@ export class AREngine {
         }
       }
     }
+
+    await adapter.start();
 
     // 初始化游戏系统（如果有 game 配置）
     this.initGame(unifiedConfig);
@@ -2690,6 +3313,12 @@ export class AREngine {
     this._imageAnchors = [];
     this._activeImageIndex = 0;
     this._switchBlend = null;
+    // 重置 anchor 尺度缓存：下次 start 会从新的 postMatrixs 重新捕获
+    this._anchorScaleCaptured = false;
+    this._capturedScl.set(1, 1, 1);
+    this._invCapturedScl.set(1, 1, 1);
+    this._anchorOrigin.set(0, 0, 0);
+    this._unitsPerMeter = 1;
     this._spatialAudio.stopAll();
     if (this._compassHandler) {
       window.removeEventListener('deviceorientation', this._compassHandler, true);
@@ -2740,6 +3369,8 @@ export class AREngine {
     }
 
     if (this._eightWall) {
+      this._pvz?.dispose();
+      this._pvz = null;
       this._eightWall.dispose();
       this._eightWall = null;
       this._modelManager = null;
@@ -2900,20 +3531,34 @@ export class AREngine {
     }
   }
 
-  /** 设置模型位置偏移（工具栏滑块控制） */
+  /**
+   * 设置模型位置偏移（工具栏滑块控制）。入参单位是**米**，与 config.position 一致。
+   *
+   * ⚠️ 不要直接 set 到 wrapper.position：wrapper 是 anchor.group 的子节点，
+   * 在 image 路径下父级尺度 = 图宽像素（≈291），直接写米会让偏移被放大 291 倍。
+   * 这里统一走 _metersToAnchorUnits() 换算，与 loadModel 写入 config.position
+   * 时用的系数完全同源，保证"滑块拖到多少 = 米"，两条入口不会打架。
+   */
   setModelPosition(x: number, y: number, z: number): void {
     if (this._eightWall) {
       this._eightWall.setModelPosition(x, y, z)
       return
     }
-    if (this._modelWrapper) this._modelWrapper.position.set(x, y, z);
+    const u = this._metersToAnchorUnits();
+    const ax = x * u, ay = y * u, az = z * u;
+    if (this._modelWrapper) this._modelWrapper.position.set(ax, ay, az);
     else if (this._modelManager) this._modelManager.setPosition(x, y, z);
     // 多区域：同步所有 zone wrapper
     for (const zi of this._anchors) {
       if (zi.modelWrapper && zi.modelWrapper !== this._modelWrapper) {
-        zi.modelWrapper.position.set(x, y, z);
+        zi.modelWrapper.position.set(ax, ay, az);
       }
     }
+  }
+
+  /** 当前「米 → anchor 单位」系数；image 路径外恒为 1。供上层 UI 换算/回读使用 */
+  get unitsPerMeter(): number {
+    return this._metersToAnchorUnits()
   }
 
   /** 设置模型缩放（工具栏滑块控制） */
